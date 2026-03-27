@@ -5,7 +5,7 @@ describe('Message', () => {
 
 	describe('Constructor', () => {
 		it('should create without system prompt', () => {
-			expect(new Message({ ...BASE_OPTIONS }).modelName).toBe('claude-haiku-4-5-20251001');
+			expect(new Message({ ...BASE_OPTIONS }).modelName).toBe(BASE_OPTIONS.modelName);
 		});
 		it('should accept custom system prompt', () => {
 			expect(new Message({ ...BASE_OPTIONS, systemPrompt: 'Be brief.' }).systemPrompt).toBe('Be brief.');

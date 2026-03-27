@@ -78,6 +78,7 @@ class Message extends BaseClaude {
 	async init(force = false) {
 		if (this._initialized && !force) return;
 
+		await this._ensureClient();
 		log.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
 
 		if (this.healthCheck) {
@@ -136,14 +137,24 @@ class Message extends BaseClaude {
 			...(systemParam && { system: systemParam }),
 		};
 
-		// Native structured output via JSON Schema
-		if (this._responseSchema) {
+		// Native structured output via JSON Schema (not supported on Vertex AI)
+		if (this._responseSchema && !this.vertexai) {
 			params.output_config = {
 				format: {
 					type: 'json_schema',
 					schema: this._responseSchema
 				}
 			};
+		} else if (this._responseSchema && this.vertexai) {
+			// Fallback: inject schema into system prompt for Vertex AI
+			const schemaInstruction = `\n\nRespond ONLY with valid JSON matching this schema:\n${JSON.stringify(this._responseSchema, null, 2)}\nNo markdown code blocks, no preamble text.`;
+			if (typeof params.system === 'string') {
+				params.system += schemaInstruction;
+			} else if (Array.isArray(params.system)) {
+				params.system = [...params.system, { type: 'text', text: schemaInstruction }];
+			} else {
+				params.system = schemaInstruction.trim();
+			}
 		}
 
 		if (this.thinking) {

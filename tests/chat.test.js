@@ -40,7 +40,7 @@ describe('Chat', () => {
 			expect(response.usage).toBeTruthy();
 			expect(response.usage.promptTokens).toBeGreaterThan(0);
 			expect(response.usage.totalTokens).toBeGreaterThan(0);
-			expect(response.usage.requestedModel).toBe('claude-haiku-4-5-20251001');
+			expect(response.usage.requestedModel).toBe(BASE_OPTIONS.modelName);
 		});
 		it('should auto-init if not called', async () => {
 			const lazyChat = new Chat({ ...BASE_OPTIONS });

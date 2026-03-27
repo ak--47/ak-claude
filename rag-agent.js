@@ -94,6 +94,8 @@ class RagAgent extends BaseClaude {
 	async init(force = false) {
 		if (this._initialized && !force) return;
 
+		await this._ensureClient();
+
 		// 1. Read local text files from disk
 		this._localFileContents = [];
 		for (const filePath of this.localFiles) {

@@ -109,6 +109,8 @@ class CodeAgent extends BaseClaude {
 	async init(force = false) {
 		if (this._initialized && !force) return;
 
+		await this._ensureClient();
+
 		// Gather codebase context
 		if (!this._contextGathered || force) {
 			await this._gatherCodebaseContext();
