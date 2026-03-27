@@ -1,16 +1,5 @@
-import dotenv from 'dotenv';
-dotenv.config({ quiet: true });
 import { ToolAgent } from '../index.js';
-
-const { ANTHROPIC_API_KEY } = process.env;
-delete process.env.ANTHROPIC_API_KEY;
-if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is required to run tests");
-
-const BASE_OPTIONS = {
-	modelName: 'claude-haiku-4-5-20251001',
-	apiKey: ANTHROPIC_API_KEY,
-	logLevel: 'warn'
-};
+import { BASE_OPTIONS } from './setup.js';
 
 const HTTP_TOOLS = [
 	{

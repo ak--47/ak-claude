@@ -329,9 +329,16 @@ var BaseClaude = class {
     } else {
       this.systemPrompt = null;
     }
-    this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
-    if (!this.apiKey) {
-      throw new Error("Missing Anthropic API key. Provide via options.apiKey, ANTHROPIC_API_KEY, or CLAUDE_API_KEY env var.");
+    this.vertexai = options.vertexai ?? false;
+    this.vertexProjectId = options.vertexProjectId ?? process.env.GOOGLE_CLOUD_PROJECT ?? void 0;
+    this.vertexRegion = options.vertexRegion ?? process.env.GOOGLE_CLOUD_LOCATION ?? "us-east5";
+    if (!this.vertexai) {
+      this.apiKey = options.apiKey !== void 0 && options.apiKey !== null ? options.apiKey : process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
+      if (!this.apiKey) {
+        throw new Error("Missing Anthropic API key. Provide via options.apiKey, ANTHROPIC_API_KEY, or CLAUDE_API_KEY env var.");
+      }
+    } else {
+      this.apiKey = null;
     }
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.temperature = options.temperature ?? 0.7;
@@ -344,10 +351,15 @@ var BaseClaude = class {
     this.healthCheck = options.healthCheck ?? false;
     this.maxRetries = options.maxRetries ?? 5;
     this._configureLogLevel(options.logLevel);
-    this.client = new import_sdk.default({
-      apiKey: this.apiKey,
-      maxRetries: this.maxRetries
-    });
+    this.client = null;
+    this._clientReady = false;
+    if (!this.vertexai) {
+      this.client = new import_sdk.default({
+        apiKey: this.apiKey,
+        maxRetries: this.maxRetries
+      });
+      this._clientReady = true;
+    }
     this.history = [];
     this.lastResponseMetadata = null;
     this.exampleCount = 0;
@@ -360,6 +372,24 @@ var BaseClaude = class {
     };
     logger_default.debug(`${this.constructor.name} created with model: ${this.modelName}`);
   }
+  // ── Client Bootstrap ─────────────────────────────────────────────────────
+  /**
+   * Ensures the Anthropic client is ready. For direct API usage this is
+   * synchronous (client created in constructor). For Vertex AI this lazily
+   * imports @anthropic-ai/vertex-sdk and creates the AnthropicVertex client.
+   */
+  async _ensureClient() {
+    if (this._clientReady) return;
+    if (this.vertexai) {
+      const { AnthropicVertex } = await import("@anthropic-ai/vertex-sdk");
+      this.client = new AnthropicVertex({
+        projectId: this.vertexProjectId,
+        region: this.vertexRegion
+      });
+      this._clientReady = true;
+      logger_default.debug(`${this.constructor.name}: Vertex AI client created (project=${this.vertexProjectId}, region=${this.vertexRegion})`);
+    }
+  }
   // ── Initialization ───────────────────────────────────────────────────────
   /**
    * Initializes the instance. Idempotent unless force=true.
@@ -369,6 +399,7 @@ var BaseClaude = class {
    */
   async init(force = false) {
     if (this._initialized && !force) return;
+    await this._ensureClient();
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
     if (this.healthCheck) {
       try {

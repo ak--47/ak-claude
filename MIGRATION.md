@@ -78,9 +78,9 @@ Most constructor options are shared. The table below covers the differences.
 | `logLevel` | `logLevel` | Same |
 | `resourceExhaustedRetries` | `maxRetries` | Gemini: app-level backoff. Claude: SDK-level (Anthropic SDK handles 429s natively) |
 | `resourceExhaustedDelay` | Not available | Anthropic SDK handles backoff internally |
-| `vertexai` | Not available | Claude has no Vertex equivalent |
-| `project` | Not available | No GCP project needed |
-| `location` | Not available | No GCP region needed |
+| `vertexai` | `vertexai` | Same — `true` to use Vertex AI auth via ADC |
+| `project` | `vertexProjectId` | **Renamed.** Or `GOOGLE_CLOUD_PROJECT` env var |
+| `location` | `vertexRegion` | **Renamed.** Or `GOOGLE_CLOUD_LOCATION` env var (default: `us-east5`) |
 | `labels` | Not available | No billing labels |
 | `cachedContent` | Not available | No cache CRUD API. Use `cacheSystemPrompt` instead |
 | `healthCheck` | `healthCheck` | Same — opt-in connectivity check during `init()` |
@@ -290,7 +290,7 @@ Features in ak-gemini that are **not available** in ak-claude:
 |---|---|---|
 | `Embedding` class | Not available | Use a dedicated embedding service (OpenAI, Cohere, or Gemini embeddings directly) |
 | Cache CRUD (`createCache`, `getCache`, `listCaches`, `updateCache`, `deleteCache`, `useCache`) | Not available | Use `cacheSystemPrompt: true` for automatic prompt caching |
-| Vertex AI support (`vertexai`, `project`, `location`) | Not available | Use Anthropic API directly |
+| Vertex AI support (`vertexai`, `project`, `location`) | Available | `vertexai: true` + optional `vertexProjectId` / `vertexRegion` (same pattern as ak-gemini) |
 | Billing labels (`labels`) | Not available | Track costs via Anthropic dashboard |
 | Safety settings | Not available | Claude uses built-in content moderation |
 | `responseMimeType` on Message | Not available | Use `responseSchema` (native) or `responseFormat: 'json'` (fallback) |

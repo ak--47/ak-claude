@@ -48,7 +48,7 @@
 		"update-deps": "npx npm-check-updates -u && npm install",
 		"prune": "rm -rf tmp/*",
 		"test": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js",
-		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@anthropic-ai/sdk --external:@anthropic-ai/claude-agent-sdk --external:dotenv --external:pino-pretty --external:pino",
+		"build:cjs": "esbuild index.js --bundle --platform=node --format=cjs --outfile=index.cjs --external:@anthropic-ai/sdk --external:@anthropic-ai/claude-agent-sdk --external:@anthropic-ai/vertex-sdk --external:dotenv --external:pino-pretty --external:pino",
 		"coverage": "node --no-warnings --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
 		"typecheck": "tsc --noEmit"
 	},
@@ -65,9 +65,18 @@
 	"license": "ISC",
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.52.0",
+		"@anthropic-ai/vertex-sdk": "^0.14.4",
 		"dotenv": "^17.3.1",
 		"pino": "^10.3.1",
 		"pino-pretty": "^13.1.3"
+	},
+	"peerDependencies": {
+		"@anthropic-ai/claude-agent-sdk": ">=0.1.0"
+	},
+	"peerDependenciesMeta": {
+		"@anthropic-ai/claude-agent-sdk": {
+			"optional": true
+		}
 	},
 	"devDependencies": {
 		"@types/jest": "^30.0.0",

@@ -61,13 +61,22 @@ class BaseClaude {
 			this.systemPrompt = null; // subclasses override this default
 		}
 
-		// ── Auth ──
-		this.apiKey = options.apiKey !== undefined && options.apiKey !== null
-			? options.apiKey
-			: (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY);
+		// ── Vertex AI ──
+		this.vertexai = options.vertexai ?? false;
+		this.vertexProjectId = options.vertexProjectId ?? process.env.GOOGLE_CLOUD_PROJECT ?? undefined;
+		this.vertexRegion = options.vertexRegion ?? process.env.GOOGLE_CLOUD_LOCATION ?? 'us-east5';
 
-		if (!this.apiKey) {
-			throw new Error("Missing Anthropic API key. Provide via options.apiKey, ANTHROPIC_API_KEY, or CLAUDE_API_KEY env var.");
+		// ── Auth ──
+		if (!this.vertexai) {
+			this.apiKey = options.apiKey !== undefined && options.apiKey !== null
+				? options.apiKey
+				: (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY);
+
+			if (!this.apiKey) {
+				throw new Error("Missing Anthropic API key. Provide via options.apiKey, ANTHROPIC_API_KEY, or CLAUDE_API_KEY env var.");
+			}
+		} else {
+			this.apiKey = null;
 		}
 
 		// ── Generation Config ──
@@ -96,10 +105,17 @@ class BaseClaude {
 		this._configureLogLevel(options.logLevel);
 
 		// ── Anthropic Client ──
-		this.client = new Anthropic({
-			apiKey: this.apiKey,
-			maxRetries: this.maxRetries
-		});
+		// Client creation is deferred when vertexai=true (requires async import).
+		// _ensureClient() is called at the start of every API method.
+		this.client = null;
+		this._clientReady = false;
+		if (!this.vertexai) {
+			this.client = new Anthropic({
+				apiKey: this.apiKey,
+				maxRetries: this.maxRetries
+			});
+			this._clientReady = true;
+		}
 
 		// ── State ──
 		this.history = [];
@@ -116,6 +132,53 @@ class BaseClaude {
 		log.debug(`${this.constructor.name} created with model: ${this.modelName}`);
 	}
 
+	// ── Client Bootstrap ─────────────────────────────────────────────────────
+
+	/**
+	 * Ensures the Anthropic client is ready. For direct API usage this is
+	 * synchronous (client created in constructor). For Vertex AI this lazily
+	 * imports @anthropic-ai/vertex-sdk and creates the AnthropicVertex client.
+	 */
+	async _ensureClient() {
+		if (this._clientReady) return;
+		if (this.vertexai) {
+			const { AnthropicVertex } = await import('@anthropic-ai/vertex-sdk');
+			/** @type {any} */
+			this.client = new AnthropicVertex({
+				projectId: this.vertexProjectId,
+				region: this.vertexRegion,
+			});
+			// Workaround: @anthropic-ai/vertex-sdk declares buildRequest as async,
+			// but the base SDK calls it synchronously. Patch it with a sync version
+			// that performs the same path rewriting.
+			const MODEL_ENDPOINTS = new Set(['/v1/messages', '/v1/messages?beta=true']);
+			const vertexClient = this.client;
+			const superBuildRequest = Object.getPrototypeOf(Object.getPrototypeOf(vertexClient)).buildRequest;
+			Object.getPrototypeOf(vertexClient).buildRequest = function(options, extra) {
+				if (typeof options.body === 'object' && options.body !== null) {
+					options.body = { ...options.body };
+					if (!options.body['anthropic_version']) {
+						options.body['anthropic_version'] = 'vertex-2023-10-16';
+					}
+				}
+				if (MODEL_ENDPOINTS.has(options.path) && options.method === 'post' && typeof options.body === 'object') {
+					const model = options.body['model'];
+					options.body['model'] = undefined;
+					const stream = options.body['stream'] ?? false;
+					const specifier = stream ? 'streamRawPredict' : 'rawPredict';
+					options.path = `/projects/${this.projectId}/locations/${this.region}/publishers/anthropic/models/${model}:${specifier}`;
+				}
+				if (options.path === '/v1/messages/count_tokens' ||
+					(options.path === '/v1/messages/count_tokens?beta=true' && options.method === 'post')) {
+					options.path = `/projects/${this.projectId}/locations/${this.region}/publishers/anthropic/models/count-tokens:rawPredict`;
+				}
+				return superBuildRequest.call(this, options, extra);
+			};
+			this._clientReady = true;
+			log.debug(`${this.constructor.name}: Vertex AI client created (project=${this.vertexProjectId}, region=${this.vertexRegion})`);
+		}
+	}
+
 	// ── Initialization ───────────────────────────────────────────────────────
 
 	/**
@@ -127,6 +190,7 @@ class BaseClaude {
 	async init(force = false) {
 		if (this._initialized && !force) return;
 
+		await this._ensureClient();
 		log.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
 
 		if (this.healthCheck) {

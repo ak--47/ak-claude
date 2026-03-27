@@ -54,6 +54,7 @@ All classes except `AgentQuery` extend `BaseClaude` which provides: auth, client
 
 ### Key Design Decisions
 
+- **Dual auth: API key or Vertex AI** — `vertexai: true` uses `@anthropic-ai/vertex-sdk` + Application Default Credentials (no API key needed). Optional `vertexProjectId` / `vertexRegion` from constructor or `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` env vars. Client is created lazily via `_ensureClient()` on first API call. Direct API key auth is also supported via `apiKey` option or `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` env vars
 - **Manual history management** — Claude's Messages API is stateless; `BaseClaude` maintains `this.history[]` as a plain array and passes the full history on every `messages.create()` call (unlike Gemini's SDK which has built-in chat sessions)
 - **Content blocks** — Claude responses use content block arrays (`[{ type: 'text', text: '...' }]`), not plain strings. `_extractText()` filters for `type: 'text'` blocks and joins them
 - **`input_schema` aliasing** — ToolAgent accepts tools in Claude format (`input_schema`), Gemini format (`inputSchema`, `parametersJsonSchema`), and auto-maps them to Claude's `input_schema`
@@ -157,14 +158,22 @@ npm run typecheck          # Verify TypeScript definitions
 ## Configuration & Environment
 
 ### Environment Variables
-- `ANTHROPIC_API_KEY` — Anthropic API key (primary)
+- `ANTHROPIC_API_KEY` — Anthropic API key (primary, for direct API auth)
 - `CLAUDE_API_KEY` — Anthropic API key (fallback)
+- `GOOGLE_CLOUD_PROJECT` — GCP project ID (for Vertex AI auth)
+- `GOOGLE_CLOUD_LOCATION` — GCP region (for Vertex AI auth, default: `us-east5`)
 - `NODE_ENV` — Environment (dev/test/prod affects log levels)
 - `LOG_LEVEL` — Override log level (debug/info/warn/error)
 
 ### Authentication
 
 ```javascript
+// Vertex AI via Application Default Credentials (recommended for GCP deployments)
+new Transformer({ vertexai: true });
+
+// Vertex AI with explicit project/region
+new Transformer({ vertexai: true, vertexProjectId: 'my-project', vertexRegion: 'us-central1' });
+
 // API key via constructor
 new Transformer({ apiKey: 'your-key' });
 

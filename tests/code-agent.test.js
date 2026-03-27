@@ -1,19 +1,8 @@
-import dotenv from 'dotenv';
-dotenv.config({ quiet: true });
 import { CodeAgent } from '../index.js';
+import { BASE_OPTIONS } from './setup.js';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import os from 'node:os';
-
-const { ANTHROPIC_API_KEY } = process.env;
-delete process.env.ANTHROPIC_API_KEY;
-if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is required to run tests");
-
-const BASE_OPTIONS = {
-	modelName: 'claude-haiku-4-5-20251001',
-	apiKey: ANTHROPIC_API_KEY,
-	logLevel: 'warn'
-};
 
 let tmpDir;
 

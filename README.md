@@ -12,12 +12,15 @@ Requires Node.js 18+ and [@anthropic-ai/sdk](https://www.npmjs.com/package/@anth
 
 ## Quick Start
 
-```sh
-export ANTHROPIC_API_KEY=your-key
-```
-
 ```javascript
 import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, AgentQuery } from 'ak-claude';
+
+// Vertex AI auth (recommended for GCP deployments — uses Application Default Credentials)
+new Chat({ vertexai: true });
+
+// Or direct API key auth
+// export ANTHROPIC_API_KEY=your-key
+new Chat({ apiKey: 'your-key' });
 ```
 
 ---
@@ -295,7 +298,13 @@ All classes extend `BaseClaude` and share these features (except `AgentQuery`, w
 ### Authentication
 
 ```javascript
-// Anthropic API
+// Vertex AI (GCP — uses Application Default Credentials, no API key needed)
+new Chat({ vertexai: true });
+
+// Vertex AI with explicit project/region
+new Chat({ vertexai: true, vertexProjectId: 'my-project', vertexRegion: 'us-central1' });
+
+// Direct API key
 new Chat({ apiKey: 'your-key' }); // or ANTHROPIC_API_KEY / CLAUDE_API_KEY env var
 ```
 
@@ -398,7 +407,10 @@ All classes (except AgentQuery) accept `BaseClaudeOptions`:
 |--------|------|---------|-------------|
 | `modelName` | string | `'claude-sonnet-4-6'` | Claude model to use |
 | `systemPrompt` | string | varies by class | System prompt |
-| `apiKey` | string | env var | Anthropic API key |
+| `apiKey` | string | env var | Anthropic API key (not needed with `vertexai`) |
+| `vertexai` | boolean | `false` | Use Vertex AI auth (Application Default Credentials) |
+| `vertexProjectId` | string | `GOOGLE_CLOUD_PROJECT` | GCP project ID (Vertex AI only) |
+| `vertexRegion` | string | `'us-east5'` | GCP region (Vertex AI only) |
 | `maxTokens` | number | `8192` | Max tokens in response |
 | `temperature` | number | `0.7` | Temperature (not used with thinking) |
 | `topP` | number | `0.95` | Top-P (not used with thinking) |

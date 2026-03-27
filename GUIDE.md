@@ -7,7 +7,7 @@
 npm install ak-claude
 ```
 
-**Requirements**: Node.js 18+, an `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` env var.
+**Requirements**: Node.js 18+. Auth via Vertex AI (`vertexai: true`) or an `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` env var.
 
 ---
 
@@ -38,7 +38,7 @@ npm install ak-claude
 
 Every class in ak-claude extends `BaseClaude`, which handles:
 
-- **Authentication** --- Anthropic API key via env var or explicit option
+- **Authentication** --- Vertex AI via Application Default Credentials (`vertexai: true`) or Anthropic API key
 - **Message history** --- Managed conversation state as a plain array (Claude's Messages API is stateless; ak-claude manages history for you)
 - **Token tracking** --- Input/output token counts after every call, including cache metrics
 - **Cost estimation** --- Dollar estimates before sending
@@ -64,10 +64,29 @@ new Chat({ modelName: 'claude-opus-4-6' });
 
 ## Authentication
 
-### API Key (default)
+ak-claude supports two authentication methods: **Vertex AI** (GCP) and **direct API key**.
+
+### Vertex AI (recommended for GCP deployments)
 
 ```javascript
-// Option 1: Environment variable (recommended)
+// Uses Application Default Credentials — no API key needed
+// Auth via: gcloud auth application-default login
+new Chat({ vertexai: true });
+
+// With explicit project and region
+new Chat({
+  vertexai: true,
+  vertexProjectId: 'my-gcp-project',    // or GOOGLE_CLOUD_PROJECT env var
+  vertexRegion: 'us-central1'           // or GOOGLE_CLOUD_LOCATION env var (default: 'us-east5')
+});
+```
+
+When `vertexai: true`, the Anthropic client is created lazily using `@anthropic-ai/vertex-sdk` (included as a dependency). No API key is required — authentication flows through Google Cloud's Application Default Credentials (ADC). This is ideal for server deployments on GCP, CI/CD pipelines with service accounts, or local development with `gcloud auth`.
+
+### API Key (direct Anthropic API)
+
+```javascript
+// Option 1: Environment variable
 // Set ANTHROPIC_API_KEY or CLAUDE_API_KEY in your .env or shell
 new Chat();
 
@@ -80,7 +99,7 @@ ak-claude checks for keys in this order:
 2. `ANTHROPIC_API_KEY` environment variable
 3. `CLAUDE_API_KEY` environment variable
 
-If none are found, the constructor throws immediately.
+If `vertexai` is not set and no key is found, the constructor throws immediately.
 
 ### Rate Limit Retries
 
@@ -1373,7 +1392,10 @@ const { Transformer, Chat } = require('ak-claude');
 |---|---|---|
 | `modelName` | string | `'claude-sonnet-4-6'` |
 | `systemPrompt` | string \| null \| false | varies by class |
-| `apiKey` | string | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` env var |
+| `apiKey` | string | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` env var (not needed with `vertexai`) |
+| `vertexai` | boolean | `false` (use Vertex AI auth via ADC) |
+| `vertexProjectId` | string | `GOOGLE_CLOUD_PROJECT` env var |
+| `vertexRegion` | string | `'us-east5'` or `GOOGLE_CLOUD_LOCATION` env var |
 | `maxTokens` | number | `8192` |
 | `temperature` | number | `0.7` (ignored with thinking) |
 | `topP` | number | `0.95` (ignored with thinking) |

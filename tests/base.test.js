@@ -1,30 +1,27 @@
-import dotenv from 'dotenv';
-dotenv.config({ quiet: true });
 import { Chat, Transformer, BaseClaude, log } from '../index.js';
-
-const { ANTHROPIC_API_KEY } = process.env;
-delete process.env.ANTHROPIC_API_KEY;
-if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is required to run tests");
-
-const BASE_OPTIONS = {
-	modelName: 'claude-haiku-4-5-20251001',
-	apiKey: ANTHROPIC_API_KEY,
-	logLevel: 'warn'
-};
+import { BASE_OPTIONS, USE_VERTEX } from './setup.js';
 
 describe('BaseClaude — Shared Behavior', () => {
 
 	describe('Authentication', () => {
-		it('should throw on missing API key', () => {
-			expect(() => new Chat({})).toThrow(/api key/i);
-		});
-		it('should throw on empty string API key', () => {
-			expect(() => new Chat({ apiKey: '' })).toThrow(/api key/i);
-		});
-		it('should accept API key via options', () => {
-			const chat = new Chat({ apiKey: ANTHROPIC_API_KEY });
-			expect(chat.apiKey).toBe(ANTHROPIC_API_KEY);
-		});
+		if (!USE_VERTEX) {
+			it('should throw on missing API key', () => {
+				expect(() => new Chat({})).toThrow(/api key/i);
+			});
+			it('should throw on empty string API key', () => {
+				expect(() => new Chat({ apiKey: '' })).toThrow(/api key/i);
+			});
+			it('should accept API key via options', () => {
+				const chat = new Chat({ ...BASE_OPTIONS });
+				expect(chat.apiKey).toBeTruthy();
+			});
+		} else {
+			it('should accept vertexai without API key', () => {
+				const chat = new Chat({ ...BASE_OPTIONS });
+				expect(chat.vertexai).toBe(true);
+				expect(chat.apiKey).toBeNull();
+			});
+		}
 	});
 
 	describe('init()', () => {
@@ -63,7 +60,7 @@ describe('BaseClaude — Shared Behavior', () => {
 			expect(typeof usage.responseTokens).toBe('number');
 			expect(typeof usage.totalTokens).toBe('number');
 			expect(usage.promptTokens).toBeGreaterThan(0);
-			expect(usage.requestedModel).toBe('claude-haiku-4-5-20251001');
+			expect(usage.requestedModel).toBe(BASE_OPTIONS.modelName);
 			expect(typeof usage.timestamp).toBe('number');
 		});
 	});
@@ -87,7 +84,7 @@ describe('BaseClaude — Shared Behavior', () => {
 			expect(cost).toHaveProperty('model');
 			expect(cost).toHaveProperty('pricing');
 			expect(cost).toHaveProperty('estimatedInputCost');
-			expect(cost.model).toBe('claude-haiku-4-5-20251001');
+			expect(cost.model).toBe(BASE_OPTIONS.modelName);
 		});
 	});
 
@@ -217,7 +214,7 @@ describe('BaseClaude — Shared Behavior', () => {
 
 	describe('Constructor', () => {
 		it('should set model name', () => {
-			expect(new Chat({ ...BASE_OPTIONS }).modelName).toBe('claude-haiku-4-5-20251001');
+			expect(new Chat({ ...BASE_OPTIONS }).modelName).toBe(BASE_OPTIONS.modelName);
 		});
 		it('should have null lastResponseMetadata before any call', () => {
 			expect(new Chat({ ...BASE_OPTIONS }).lastResponseMetadata).toBeNull();

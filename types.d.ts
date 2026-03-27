@@ -64,8 +64,16 @@ export interface BaseClaudeOptions {
   logLevel?: LogLevel;
 
   // Authentication
-  /** API key for Anthropic API */
+  /** API key for Anthropic API (not required when vertexai is true) */
   apiKey?: string;
+
+  // Vertex AI
+  /** Use Vertex AI instead of direct Anthropic API (default: false). Auth via Application Default Credentials. */
+  vertexai?: boolean;
+  /** Google Cloud project ID for Vertex AI (or GOOGLE_CLOUD_PROJECT env var) */
+  vertexProjectId?: string;
+  /** Google Cloud region for Vertex AI (default: 'us-east5', or GOOGLE_CLOUD_LOCATION env var) */
+  vertexRegion?: string;
 
   // Generation config
   /** Maximum output tokens (default: 8192) */

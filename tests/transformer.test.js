@@ -1,19 +1,9 @@
-import dotenv from 'dotenv';
-dotenv.config({ quiet: true });
 import { Transformer, attemptJSONRecovery } from '../index.js';
+import { BASE_OPTIONS as _BASE_OPTIONS } from './setup.js';
 import path from 'path';
 import fs from 'fs';
 
-const { ANTHROPIC_API_KEY } = process.env;
-delete process.env.ANTHROPIC_API_KEY;
-if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is required to run tests");
-
-const BASE_OPTIONS = {
-	modelName: 'claude-haiku-4-5-20251001',
-	apiKey: ANTHROPIC_API_KEY,
-	logLevel: 'warn',
-	temperature: 0.1
-};
+const BASE_OPTIONS = { ..._BASE_OPTIONS, temperature: 0.1 };
 
 describe('Transformer — Basics', () => {
 	let transformer;
@@ -165,15 +155,15 @@ describe('Transformer — CONTEXT and EXPLANATION', () => {
 
 describe('Transformer — System Prompt Handling', () => {
 	it('should use default JSON instructions when systemPrompt not provided', () => {
-		const t = new Transformer({ apiKey: ANTHROPIC_API_KEY });
+		const t = new Transformer({ ...BASE_OPTIONS });
 		expect(t.systemPrompt).toContain('JSON transformation engine');
 	});
 	it('should use custom systemPrompt', () => {
-		const t = new Transformer({ apiKey: ANTHROPIC_API_KEY, systemPrompt: 'You are a pirate.' });
+		const t = new Transformer({ ...BASE_OPTIONS, systemPrompt: 'You are a pirate.' });
 		expect(t.systemPrompt).toBe('You are a pirate.');
 	});
 	it('should set systemPrompt to null when set to null', () => {
-		const t = new Transformer({ apiKey: ANTHROPIC_API_KEY, systemPrompt: null });
+		const t = new Transformer({ ...BASE_OPTIONS, systemPrompt: null });
 		expect(t.systemPrompt).toBeNull();
 	});
 });
