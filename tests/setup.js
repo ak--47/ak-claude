@@ -23,8 +23,8 @@ if (USE_VERTEX) {
 	BASE_OPTIONS = {
 		modelName: 'claude-3-5-haiku@20241022',
 		vertexai: true,
-		vertexProjectId: 'mixpanel-claude-code',
-		vertexRegion: 'us-east5',
+		vertexProjectId: process.env.GOOGLE_CLOUD_PROJECT || undefined,
+		vertexRegion: process.env.GOOGLE_CLOUD_LOCATION || 'us-east5',
 		logLevel: 'warn'
 	};
 } else {

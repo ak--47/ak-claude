@@ -386,6 +386,28 @@ var BaseClaude = class {
         projectId: this.vertexProjectId,
         region: this.vertexRegion
       });
+      const MODEL_ENDPOINTS = /* @__PURE__ */ new Set(["/v1/messages", "/v1/messages?beta=true"]);
+      const vertexClient = this.client;
+      const superBuildRequest = Object.getPrototypeOf(Object.getPrototypeOf(vertexClient)).buildRequest;
+      Object.getPrototypeOf(vertexClient).buildRequest = function(options, extra) {
+        if (typeof options.body === "object" && options.body !== null) {
+          options.body = { ...options.body };
+          if (!options.body["anthropic_version"]) {
+            options.body["anthropic_version"] = "vertex-2023-10-16";
+          }
+        }
+        if (MODEL_ENDPOINTS.has(options.path) && options.method === "post" && typeof options.body === "object") {
+          const model = options.body["model"];
+          options.body["model"] = void 0;
+          const stream = options.body["stream"] ?? false;
+          const specifier = stream ? "streamRawPredict" : "rawPredict";
+          options.path = `/projects/${this.projectId}/locations/${this.region}/publishers/anthropic/models/${model}:${specifier}`;
+        }
+        if (options.path === "/v1/messages/count_tokens" || options.path === "/v1/messages/count_tokens?beta=true" && options.method === "post") {
+          options.path = `/projects/${this.projectId}/locations/${this.region}/publishers/anthropic/models/count-tokens:rawPredict`;
+        }
+        return superBuildRequest.call(this, options, extra);
+      };
       this._clientReady = true;
       logger_default.debug(`${this.constructor.name}: Vertex AI client created (project=${this.vertexProjectId}, region=${this.vertexRegion})`);
     }
@@ -1100,6 +1122,7 @@ var Message = class extends base_default {
    */
   async init(force = false) {
     if (this._initialized && !force) return;
+    await this._ensureClient();
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
     if (this.healthCheck) {
       try {
@@ -1149,13 +1172,26 @@ var Message = class extends base_default {
       ), content: payloadStr }],
       ...systemParam && { system: systemParam }
     };
-    if (this._responseSchema) {
+    if (this._responseSchema && !this.vertexai) {
       params.output_config = {
         format: {
           type: "json_schema",
           schema: this._responseSchema
         }
       };
+    } else if (this._responseSchema && this.vertexai) {
+      const schemaInstruction = `
+
+Respond ONLY with valid JSON matching this schema:
+${JSON.stringify(this._responseSchema, null, 2)}
+No markdown code blocks, no preamble text.`;
+      if (typeof params.system === "string") {
+        params.system += schemaInstruction;
+      } else if (Array.isArray(params.system)) {
+        params.system = [...params.system, { type: "text", text: schemaInstruction }];
+      } else {
+        params.system = schemaInstruction.trim();
+      }
     }
     if (this.thinking) {
       params.thinking = this.thinking;
@@ -1488,6 +1524,7 @@ var CodeAgent = class extends base_default {
    */
   async init(force = false) {
     if (this._initialized && !force) return;
+    await this._ensureClient();
     if (!this._contextGathered || force) {
       await this._gatherCodebaseContext();
     }
@@ -1993,6 +2030,7 @@ var RagAgent = class extends base_default {
    */
   async init(force = false) {
     if (this._initialized && !force) return;
+    await this._ensureClient();
     this._localFileContents = [];
     for (const filePath of this.localFiles) {
       const resolvedPath = (0, import_node_path2.resolve)(filePath);
