@@ -1,0 +1,31 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"type": "node",
+			"request": "launch",
+			"name": "run",
+			"runtimeExecutable": "nodemon",
+			"program": "${file}",
+			"restart": true,
+			"console": "integratedTerminal",
+			"internalConsoleOptions": "neverOpen",
+			"args": [
+				"--ignore",
+				"/tmp/"
+			],
+			"env": {
+				"NODE_ENV": "dev"
+			}
+		},
+		{
+			"type": "node",
+			"request": "launch",
+			"name": "typecheck",
+			"runtimeExecutable": "npx",
+			"runtimeArgs": ["tsc", "--noEmit"],
+			"console": "integratedTerminal",
+			"internalConsoleOptions": "neverOpen"
+		}
+	]
+}

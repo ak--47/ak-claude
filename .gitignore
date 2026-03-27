@@ -1,0 +1,14 @@
+node_modules
+.DS_Store
+logs/*
+!logs/.gitkeep
+tmp/*
+!tmp/.gitkeep
+.env
+env.yaml
+schema.json
+scratch*
+coverage/*
+!coverage/.gitkeep
+.code-agent*
+REFERENCE-ak-gemini/

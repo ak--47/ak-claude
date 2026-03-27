@@ -1,0 +1,49 @@
+{
+	"compilerOptions": {
+		"checkJs": true,
+		"allowJs": true,
+		"declaration": true,
+		"emitDeclarationOnly": true,
+		"maxNodeModuleJsDepth": 0,
+		"target": "ESNext",
+		"module": "ESNext",
+		"moduleResolution": "Node",
+		"strict": false,
+		"noImplicitAny": false,
+		"strictNullChecks": false,
+		"allowUnreachableCode": false,
+		"allowSyntheticDefaultImports": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"noEmitOnError": false,
+		"baseUrl": ".",
+		"paths": {
+			"*": [
+				"*",
+				"src/*"
+			]
+		}
+	},
+	"exclude": [
+		"node_modules",
+		"dist",
+		"build",
+		"coverage",
+		"tests/**/*",
+		"**/*.test.js"
+	],
+	"include": [
+		"index.js",
+		"base.js",
+		"transformer.js",
+		"chat.js",
+		"message.js",
+		"tool-agent.js",
+		"code-agent.js",
+		"rag-agent.js",
+		"agent-query.js",
+		"json-helpers.js",
+		"logger.js",
+		"types.d.ts"
+	]
+}
