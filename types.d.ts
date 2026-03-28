@@ -402,6 +402,15 @@ export declare class BaseClaude {
   modelName: string;
   systemPrompt: string | null | false;
   client: any;
+  /** Raw SDK clients namespace for advanced use cases */
+  clients: {
+    /** @anthropic-ai/sdk client (null when using Vertex AI) */
+    anthropic: any | null;
+    /** @anthropic-ai/vertex-sdk client (null when using direct API) */
+    vertex: any | null;
+    /** Convenience pointer to whichever client is active */
+    raw: any;
+  };
   history: any[];
   lastResponseMetadata: ResponseMetadata | null;
   exampleCount: number;
@@ -427,6 +436,8 @@ export declare class BaseClaude {
     estimatedInputCost: number;
     note: string;
   }>;
+  listModels(): AsyncGenerator<any, void, unknown>;
+  getModel(modelId: string): Promise<any>;
 }
 
 export declare class Transformer extends BaseClaude {

@@ -295,6 +295,110 @@ For `CodeAgent`, `stop()` also kills any currently running child process via SIG
 
 All classes extend `BaseClaude` and share these features (except `AgentQuery`, which wraps the Claude Agent SDK separately).
 
+### Raw SDK Client Access
+
+All classes expose the underlying SDK clients via the `clients` namespace for advanced use cases:
+
+```javascript
+import { Chat } from 'ak-claude';
+
+const chat = new Chat({ apiKey: process.env.ANTHROPIC_API_KEY });
+await chat.init();
+
+// Access raw SDK clients
+console.log(chat.clients.anthropic);  // @anthropic-ai/sdk client (or null if using Vertex)
+console.log(chat.clients.vertex);     // @anthropic-ai/vertex-sdk client (or null if using direct API)
+console.log(chat.clients.raw);        // Convenience pointer to whichever is active
+
+// Use raw client for SDK features not yet wrapped
+for await (const model of chat.clients.raw.beta.models.list()) {
+  console.log(model.id, model.display_name);
+}
+
+// Access message batches API
+const batch = await chat.clients.anthropic.messages.batches.create({
+  requests: [
+    { custom_id: 'req1', params: { model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [...] } },
+    { custom_id: 'req2', params: { model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [...] } }
+  ]
+});
+
+// Count tokens directly
+const tokenCount = await chat.clients.raw.messages.countTokens({
+  model: 'claude-sonnet-4-6',
+  messages: chat.history
+});
+```
+
+**When to use:**
+- Access new SDK features before they're wrapped
+- Beta APIs and experimental features
+- Low-level operations (message batches, etc.)
+- SDK-specific functionality
+
+**Common patterns:**
+
+```javascript
+// Check which client is active
+console.log('Using Anthropic:', chat.clients.anthropic !== null);
+console.log('Using Vertex:', chat.clients.vertex !== null);
+
+// Advanced streaming
+const stream = chat.clients.raw.messages.stream({
+  model: 'claude-sonnet-4-6',
+  max_tokens: 1024,
+  messages: [{ role: 'user', content: 'Hello' }]
+});
+stream.on('text', (delta) => process.stdout.write(delta));
+await stream.finalMessage();
+```
+
+The original `client` property remains for backward compatibility (`client === clients.raw`).
+
+### Model Discovery
+
+List and inspect available Claude models (direct API only, not Vertex AI):
+
+```javascript
+import { Chat } from 'ak-claude';
+
+const chat = new Chat({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// List all available models
+for await (const model of chat.listModels()) {
+  console.log(model.id);          // "claude-sonnet-4-6"
+  console.log(model.display_name); // "Claude 4.6 Sonnet"
+  console.log(model.created_at);   // RFC 3339 datetime
+}
+
+// Get info about a specific model
+const modelInfo = await chat.getModel('claude-sonnet-4-6');
+console.log(modelInfo);
+
+// Find newest model
+let newestModel = null;
+let newestDate = new Date(0);
+for await (const model of chat.listModels()) {
+  const createdAt = new Date(model.created_at);
+  if (createdAt > newestDate) {
+    newestDate = createdAt;
+    newestModel = model;
+  }
+}
+
+// Check if a model exists
+async function modelExists(modelId) {
+  try {
+    await chat.getModel(modelId);
+    return true;
+  } catch (err) {
+    return err.status !== 404;
+  }
+}
+```
+
+**Note:** These helpers only work with direct Anthropic API authentication, not Vertex AI. You can also access the models API via the raw client: `chat.clients.raw.beta.models.list()`.
+
 ### Authentication
 
 ```javascript
@@ -307,6 +411,8 @@ new Chat({ vertexai: true, vertexProjectId: 'my-project', vertexRegion: 'us-cent
 // Direct API key
 new Chat({ apiKey: 'your-key' }); // or ANTHROPIC_API_KEY / CLAUDE_API_KEY env var
 ```
+
+**Note:** Vertex AI doesn't allow both `temperature` and `topP` to be specified together. When using Vertex AI, the module automatically uses only `temperature` if both are set, and `topP` is not sent to the API. The default for Vertex AI is `temperature: 0.7` (no `topP`).
 
 ### Token Estimation
 
