@@ -342,7 +342,7 @@ var BaseClaude = class {
     }
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.temperature = options.temperature ?? 0.7;
-    this.topP = options.topP ?? 0.95;
+    this.topP = options.topP ?? (this.vertexai ? void 0 : 0.95);
     this.topK = options.topK ?? void 0;
     this.thinking = options.thinking ?? null;
     this.cacheSystemPrompt = options.cacheSystemPrompt ?? false;
@@ -353,11 +353,21 @@ var BaseClaude = class {
     this._configureLogLevel(options.logLevel);
     this.client = null;
     this._clientReady = false;
+    this.clients = {
+      anthropic: null,
+      // @anthropic-ai/sdk client (direct API)
+      vertex: null,
+      // @anthropic-ai/vertex-sdk client
+      raw: null
+      // Convenience pointer to whichever is active
+    };
     if (!this.vertexai) {
       this.client = new import_sdk.default({
         apiKey: this.apiKey,
         maxRetries: this.maxRetries
       });
+      this.clients.anthropic = this.client;
+      this.clients.raw = this.client;
       this._clientReady = true;
     }
     this.history = [];
@@ -408,6 +418,8 @@ var BaseClaude = class {
         }
         return superBuildRequest.call(this, options, extra);
       };
+      this.clients.vertex = this.client;
+      this.clients.raw = this.client;
       this._clientReady = true;
       logger_default.debug(`${this.constructor.name}: Vertex AI client created (project=${this.vertexProjectId}, region=${this.vertexRegion})`);
     }
@@ -495,8 +507,13 @@ var BaseClaude = class {
     if (this.thinking) {
       params.thinking = this.thinking;
     } else {
-      if (this.temperature !== void 0) params.temperature = this.temperature;
-      if (this.topP !== void 0) params.top_p = this.topP;
+      if (this.vertexai && this.temperature !== void 0 && this.topP !== void 0) {
+        params.temperature = this.temperature;
+        logger_default.debug("Vertex AI: Using temperature only (topP ignored)");
+      } else {
+        if (this.temperature !== void 0) params.temperature = this.temperature;
+        if (this.topP !== void 0) params.top_p = this.topP;
+      }
     }
     const response = await this.client.messages.create(params);
     this.history.push({ role: "assistant", content: response.content });
@@ -528,8 +545,13 @@ var BaseClaude = class {
     if (this.thinking) {
       params.thinking = this.thinking;
     } else {
-      if (this.temperature !== void 0) params.temperature = this.temperature;
-      if (this.topP !== void 0) params.top_p = this.topP;
+      if (this.vertexai && this.temperature !== void 0 && this.topP !== void 0) {
+        params.temperature = this.temperature;
+        logger_default.debug("Vertex AI: Using temperature only (topP ignored)");
+      } else {
+        if (this.temperature !== void 0) params.temperature = this.temperature;
+        if (this.topP !== void 0) params.top_p = this.topP;
+      }
     }
     const stream = this.client.messages.stream(params);
     return stream;
@@ -723,6 +745,50 @@ ${contextText}
       estimatedInputCost: tokenInfo.inputTokens / 1e6 * pricing.input,
       note: "Cost is for input tokens only; output cost depends on response length"
     };
+  }
+  // ── Model Management ─────────────────────────────────────────────────────
+  /**
+   * Lists all available models from the Anthropic API.
+   * Provides model IDs, display names, and creation dates.
+   * Returns an async iterable that automatically fetches more pages as needed.
+   *
+   * NOTE: Only available with direct Anthropic API access (not Vertex AI).
+   * @returns {AsyncIterable<Object>} AsyncIterable of model objects
+   * @throws {Error} If using Vertex AI authentication
+   * @example
+   * const chat = new Chat({ apiKey: 'your-key' });
+   * for await (const model of chat.listModels()) {
+   *   console.log(model.id, model.display_name);
+   * }
+   */
+  async *listModels() {
+    if (this.vertexai) {
+      throw new Error("listModels() is not available with Vertex AI. Use direct Anthropic API authentication instead.");
+    }
+    await this._ensureClient();
+    const pageIterator = this.client.beta.models.list();
+    for await (const model of pageIterator) {
+      yield model;
+    }
+  }
+  /**
+   * Retrieves detailed information about a specific model.
+   *
+   * NOTE: Only available with direct Anthropic API access (not Vertex AI).
+   * @param {string} modelId - The model ID (e.g., 'claude-sonnet-4-6')
+   * @returns {Promise<Object>} The model details
+   * @throws {Error} If using Vertex AI authentication
+   * @example
+   * const chat = new Chat({ apiKey: 'your-key' });
+   * const modelInfo = await chat.getModel('claude-sonnet-4-6');
+   * console.log(modelInfo);
+   */
+  async getModel(modelId) {
+    if (this.vertexai) {
+      throw new Error("getModel() is not available with Vertex AI. Use direct Anthropic API authentication instead.");
+    }
+    await this._ensureClient();
+    return await this.client.beta.models.retrieve(modelId);
   }
   // ── Application-Level Retry ──────────────────────────────────────────────
   /**
