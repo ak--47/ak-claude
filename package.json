@@ -2,7 +2,7 @@
 	"name": "ak-claude",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Claude AI Helper for doing... everything",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"main": "index.js",
 	"files": [
 		"index.js",
