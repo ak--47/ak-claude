@@ -1280,7 +1280,7 @@ No markdown code blocks, no preamble text.`;
     };
     if (this._isStructured) {
       try {
-        if (this._responseSchema) {
+        if (this._responseSchema && !this.vertexai) {
           result.data = JSON.parse(text);
         } else {
           result.data = extractJSON(text);
