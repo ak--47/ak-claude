@@ -183,7 +183,7 @@ class Message extends BaseClaude {
 		// Parse structured data if configured
 		if (this._isStructured) {
 			try {
-				if (this._responseSchema) {
+				if (this._responseSchema && !this.vertexai) {
 					// Native structured output — guaranteed valid JSON
 					result.data = JSON.parse(text);
 				} else {

@@ -21,7 +21,7 @@ let BASE_OPTIONS;
 
 if (USE_VERTEX) {
 	BASE_OPTIONS = {
-		modelName: 'claude-3-5-haiku@20241022',
+		modelName: 'claude-haiku-4-5@20251001',
 		vertexai: true,
 		vertexProjectId: process.env.GOOGLE_CLOUD_PROJECT || undefined,
 		vertexRegion: process.env.GOOGLE_CLOUD_LOCATION || 'us-east5',
