@@ -1373,8 +1373,7 @@ var ToolAgent = class extends base_default {
       if (response.stop_reason !== "tool_use") break;
       const toolUseBlocks = response.content.filter((b) => b.type === "tool_use");
       if (toolUseBlocks.length === 0) break;
-      const toolResults = [];
-      for (const block of toolUseBlocks) {
+      const execResults = await Promise.all(toolUseBlocks.map(async (block) => {
         if (this.onToolCall) {
           try {
             this.onToolCall(block.name, block.input);
@@ -1386,14 +1385,7 @@ var ToolAgent = class extends base_default {
           try {
             const allowed = await this.onBeforeExecution(block.name, block.input);
             if (allowed === false) {
-              const result2 = { error: "Execution denied by onBeforeExecution callback" };
-              allToolCalls.push({ name: block.name, args: block.input, result: result2 });
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: block.id,
-                content: JSON.stringify(result2)
-              });
-              continue;
+              return { block, result: { error: "Execution denied by onBeforeExecution callback" } };
             }
           } catch (e) {
             logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
@@ -1406,13 +1398,16 @@ var ToolAgent = class extends base_default {
           logger_default.warn(`Tool ${block.name} failed: ${err.message}`);
           result = { error: err.message };
         }
+        return { block, result };
+      }));
+      const toolResults = execResults.map(({ block, result }) => {
         allToolCalls.push({ name: block.name, args: block.input, result });
-        toolResults.push({
+        return {
           type: "tool_result",
           tool_use_id: block.id,
           content: typeof result === "string" ? result : JSON.stringify(result)
-        });
-      }
+        };
+      });
       response = await this._sendMessage(toolResults, { tools: this.tools, ...toolChoice && { tool_choice: toolChoice } });
     }
     this._cumulativeUsage = {
@@ -1471,9 +1466,7 @@ var ToolAgent = class extends base_default {
         };
         return;
       }
-      const toolResults = [];
       for (const block of toolUseBlocks) {
-        if (this._stopped) break;
         yield { type: "tool_call", toolName: block.name, args: block.input };
         if (this.onToolCall) {
           try {
@@ -1482,6 +1475,8 @@ var ToolAgent = class extends base_default {
             logger_default.warn(`onToolCall callback error: ${e.message}`);
           }
         }
+      }
+      const execResults = await Promise.all(toolUseBlocks.map(async (block) => {
         let denied = false;
         if (this.onBeforeExecution) {
           try {
@@ -1502,6 +1497,10 @@ var ToolAgent = class extends base_default {
             result = { error: err.message };
           }
         }
+        return { block, result };
+      }));
+      const toolResults = [];
+      for (const { block, result } of execResults) {
         allToolCalls.push({ name: block.name, args: block.input, result });
         yield { type: "tool_result", toolName: block.name, result };
         toolResults.push({
