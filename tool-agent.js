@@ -268,6 +268,7 @@ class ToolAgent extends BaseClaude {
 
 			// Yield tool_call events and fire onToolCall callbacks before executing
 			for (const block of toolUseBlocks) {
+				if (this._stopped) break;
 				yield { type: 'tool_call', toolName: block.name, args: block.input };
 				if (this.onToolCall) {
 					try { this.onToolCall(block.name, block.input); }
@@ -277,6 +278,10 @@ class ToolAgent extends BaseClaude {
 
 			// Execute all tools in parallel
 			const execResults = await Promise.all(toolUseBlocks.map(async (block) => {
+				if (this._stopped) {
+					return { block, result: { error: 'Agent was stopped' } };
+				}
+
 				// Check onBeforeExecution gate
 				let denied = false;
 				if (this.onBeforeExecution) {

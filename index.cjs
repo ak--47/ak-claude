@@ -1467,6 +1467,7 @@ var ToolAgent = class extends base_default {
         return;
       }
       for (const block of toolUseBlocks) {
+        if (this._stopped) break;
         yield { type: "tool_call", toolName: block.name, args: block.input };
         if (this.onToolCall) {
           try {
@@ -1477,6 +1478,9 @@ var ToolAgent = class extends base_default {
         }
       }
       const execResults = await Promise.all(toolUseBlocks.map(async (block) => {
+        if (this._stopped) {
+          return { block, result: { error: "Agent was stopped" } };
+        }
         let denied = false;
         if (this.onBeforeExecution) {
           try {
