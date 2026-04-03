@@ -561,6 +561,7 @@ All classes (except AgentQuery) accept `BaseClaudeOptions`:
 | `onBeforeExecution` | function | — | `async (toolName, args) => boolean` — gate execution |
 | `toolChoice` | object | — | Tool choice config (`auto`, `any`, `tool`, `none`) |
 | `disableParallelToolUse` | boolean | `false` | Force sequential tool calls |
+| `parallelToolCalls` | boolean \| number | `true` | Parallel tool execution: `false` = sequential, `true` = unlimited, number = concurrency limit |
 
 ### CodeAgent-Specific
 

@@ -430,6 +430,22 @@ const agent = new ToolAgent({
 });
 ```
 
+### Parallel Tool Execution
+
+Control whether tool calls within a round execute in parallel or sequentially:
+
+```javascript
+const agent = new ToolAgent({
+  tools: [...],
+  toolExecutor: myExecutor,
+  parallelToolCalls: true,   // default: unlimited parallel execution
+  // parallelToolCalls: false, // sequential execution
+  // parallelToolCalls: 3,    // max 3 concurrent tool executions
+});
+```
+
+When the model returns multiple tool calls in a single response, parallel execution runs them concurrently — significantly faster for I/O-bound tools (HTTP requests, database queries, etc.).
+
 ### Streaming
 
 Stream the agent's output in real-time --- useful for showing progress in a UI:

@@ -20,6 +20,31 @@ import log from './logger.js';
  */
 
 /**
+ * Execute async task factories with a concurrency limit.
+ * @param {Array<() => Promise<any>>} tasks
+ * @param {number} concurrency - Infinity for unlimited, 1 for sequential
+ * @returns {Promise<any[]>} Results in same order as tasks
+ */
+async function runWithConcurrency(tasks, concurrency) {
+	if (concurrency === Infinity) return Promise.all(tasks.map(t => t()));
+	if (concurrency === 1) {
+		const results = [];
+		for (const t of tasks) results.push(await t());
+		return results;
+	}
+	const results = new Array(tasks.length);
+	let next = 0;
+	async function worker() {
+		while (next < tasks.length) {
+			const i = next++;
+			results[i] = await tasks[i]();
+		}
+	}
+	await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
+	return results;
+}
+
+/**
  * AI agent that uses user-provided tools to accomplish tasks.
  * Automatically manages the tool-use loop: when Claude decides to call
  * a tool, the agent executes it via your toolExecutor, sends the result back,
@@ -90,6 +115,13 @@ class ToolAgent extends BaseClaude {
 		this.toolChoice = options.toolChoice ?? undefined;
 		this.disableParallelToolUse = options.disableParallelToolUse ?? false;
 
+		// ── Parallel execution ──
+		this.parallelToolCalls = options.parallelToolCalls ?? true;
+		/** @private */
+		this._concurrency = this.parallelToolCalls === true ? Infinity
+			: this.parallelToolCalls === false ? 1
+			: this.parallelToolCalls;
+
 		// ── Tool loop config ──
 		this.maxToolRounds = options.maxToolRounds || 10;
 		this.onToolCall = options.onToolCall || null;
@@ -147,9 +179,8 @@ class ToolAgent extends BaseClaude {
 			const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
 			if (toolUseBlocks.length === 0) break;
 
-			// Execute tools and build tool_result content blocks
-			const toolResults = [];
-			for (const block of toolUseBlocks) {
+			// Execute tools (parallel or sequential based on _concurrency)
+			const tasks = toolUseBlocks.map(block => async () => {
 				// Fire onToolCall callback
 				if (this.onToolCall) {
 					try { this.onToolCall(block.name, block.input); }
@@ -162,13 +193,7 @@ class ToolAgent extends BaseClaude {
 						const allowed = await this.onBeforeExecution(block.name, block.input);
 						if (allowed === false) {
 							const result = { error: 'Execution denied by onBeforeExecution callback' };
-							allToolCalls.push({ name: block.name, args: block.input, result });
-							toolResults.push({
-								type: 'tool_result',
-								tool_use_id: block.id,
-								content: JSON.stringify(result)
-							});
-							continue;
+							return { toolCall: { name: block.name, args: block.input, result }, toolResult: { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) } };
 						}
 					} catch (e) {
 						log.warn(`onBeforeExecution callback error: ${e.message}`);
@@ -183,14 +208,15 @@ class ToolAgent extends BaseClaude {
 					result = { error: err.message };
 				}
 
-				allToolCalls.push({ name: block.name, args: block.input, result });
+				return {
+					toolCall: { name: block.name, args: block.input, result },
+					toolResult: { type: 'tool_result', tool_use_id: block.id, content: typeof result === 'string' ? result : JSON.stringify(result) }
+				};
+			});
 
-				toolResults.push({
-					type: 'tool_result',
-					tool_use_id: block.id,
-					content: typeof result === 'string' ? result : JSON.stringify(result)
-				});
-			}
+			const results = await runWithConcurrency(tasks, this._concurrency);
+			const toolResults = results.map(r => r.toolResult);
+			for (const r of results) allToolCalls.push(r.toolCall);
 
 			// Send tool results back to Claude as user message
 			response = await this._sendMessage(toolResults, { tools: this.tools, ...(toolChoice && { tool_choice: toolChoice }) });
@@ -270,50 +296,97 @@ class ToolAgent extends BaseClaude {
 				return;
 			}
 
-			// Execute tools sequentially so we can yield events
+			// Execute tools and yield events
 			const toolResults = [];
-			for (const block of toolUseBlocks) {
-				if (this._stopped) break;
+			if (this._concurrency === 1) {
+				// Sequential: yield tool_call, execute, yield tool_result for each
+				for (const block of toolUseBlocks) {
+					if (this._stopped) break;
 
-				yield { type: 'tool_call', toolName: block.name, args: block.input };
+					yield { type: 'tool_call', toolName: block.name, args: block.input };
 
-				// Fire onToolCall callback
-				if (this.onToolCall) {
-					try { this.onToolCall(block.name, block.input); }
-					catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
-				}
-
-				// Check onBeforeExecution gate
-				let denied = false;
-				if (this.onBeforeExecution) {
-					try {
-						const allowed = await this.onBeforeExecution(block.name, block.input);
-						if (allowed === false) denied = true;
-					} catch (e) {
-						log.warn(`onBeforeExecution callback error: ${e.message}`);
+					if (this.onToolCall) {
+						try { this.onToolCall(block.name, block.input); }
+						catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
 					}
-				}
 
-				let result;
-				if (denied) {
-					result = { error: 'Execution denied by onBeforeExecution callback' };
-				} else {
-					try {
-						result = await this.toolExecutor(block.name, block.input);
-					} catch (err) {
-						log.warn(`Tool ${block.name} failed: ${err.message}`);
-						result = { error: err.message };
+					let denied = false;
+					if (this.onBeforeExecution) {
+						try {
+							const allowed = await this.onBeforeExecution(block.name, block.input);
+							if (allowed === false) denied = true;
+						} catch (e) {
+							log.warn(`onBeforeExecution callback error: ${e.message}`);
+						}
 					}
+
+					let result;
+					if (denied) {
+						result = { error: 'Execution denied by onBeforeExecution callback' };
+					} else {
+						try {
+							result = await this.toolExecutor(block.name, block.input);
+						} catch (err) {
+							log.warn(`Tool ${block.name} failed: ${err.message}`);
+							result = { error: err.message };
+						}
+					}
+
+					allToolCalls.push({ name: block.name, args: block.input, result });
+					yield { type: 'tool_result', toolName: block.name, result };
+
+					toolResults.push({
+						type: 'tool_result',
+						tool_use_id: block.id,
+						content: typeof result === 'string' ? result : JSON.stringify(result)
+					});
+				}
+			} else {
+				// Parallel: yield all tool_call events, execute all, yield all tool_result events
+				for (const block of toolUseBlocks) {
+					yield { type: 'tool_call', toolName: block.name, args: block.input };
 				}
 
-				allToolCalls.push({ name: block.name, args: block.input, result });
-				yield { type: 'tool_result', toolName: block.name, result };
+				const tasks = toolUseBlocks.map(block => async () => {
+					if (this.onToolCall) {
+						try { this.onToolCall(block.name, block.input); }
+						catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
+					}
 
-				toolResults.push({
-					type: 'tool_result',
-					tool_use_id: block.id,
-					content: typeof result === 'string' ? result : JSON.stringify(result)
+					let denied = false;
+					if (this.onBeforeExecution) {
+						try {
+							const allowed = await this.onBeforeExecution(block.name, block.input);
+							if (allowed === false) denied = true;
+						} catch (e) {
+							log.warn(`onBeforeExecution callback error: ${e.message}`);
+						}
+					}
+
+					let result;
+					if (denied) {
+						result = { error: 'Execution denied by onBeforeExecution callback' };
+					} else {
+						try {
+							result = await this.toolExecutor(block.name, block.input);
+						} catch (err) {
+							log.warn(`Tool ${block.name} failed: ${err.message}`);
+							result = { error: err.message };
+						}
+					}
+
+					return {
+						toolCall: { name: block.name, args: block.input, result },
+						toolResult: { type: 'tool_result', tool_use_id: block.id, content: typeof result === 'string' ? result : JSON.stringify(result) }
+					};
 				});
+
+				const results = await runWithConcurrency(tasks, this._concurrency);
+				for (const r of results) {
+					allToolCalls.push(r.toolCall);
+					yield { type: 'tool_result', toolName: r.toolCall.name, result: r.toolCall.result };
+					toolResults.push(r.toolResult);
+				}
 			}
 
 			// Send tool results back and get next stream

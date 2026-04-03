@@ -203,6 +203,8 @@ export interface ToolAgentOptions extends BaseClaudeOptions {
   toolChoice?: ToolChoice;
   /** Disable parallel tool use — forces sequential tool calls (default: false) */
   disableParallelToolUse?: boolean;
+  /** Parallel tool execution: false = sequential, true = unlimited parallel, number = concurrency limit (default: true) */
+  parallelToolCalls?: boolean | number;
 }
 
 export interface LocalDataEntry {
@@ -483,6 +485,7 @@ export declare class ToolAgent extends BaseClaude {
   onBeforeExecution: ((toolName: string, args: Record<string, any>) => Promise<boolean>) | null;
   toolChoice: ToolChoice | undefined;
   disableParallelToolUse: boolean;
+  parallelToolCalls: boolean | number;
 
   chat(message: string, opts?: Record<string, any>): Promise<AgentResponse>;
   stream(message: string, opts?: Record<string, any>): AsyncGenerator<AgentStreamEvent, void, unknown>;

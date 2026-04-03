@@ -1309,6 +1309,24 @@ No markdown code blocks, no preamble text.`;
 var message_default = Message;
 
 // tool-agent.js
+async function runWithConcurrency(tasks, concurrency) {
+  if (concurrency === Infinity) return Promise.all(tasks.map((t) => t()));
+  if (concurrency === 1) {
+    const results2 = [];
+    for (const t of tasks) results2.push(await t());
+    return results2;
+  }
+  const results = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
+  return results;
+}
 var ToolAgent = class extends base_default {
   /**
    * @param {ToolAgentOptions} [options={}]
@@ -1332,6 +1350,8 @@ var ToolAgent = class extends base_default {
     }
     this.toolChoice = options.toolChoice ?? void 0;
     this.disableParallelToolUse = options.disableParallelToolUse ?? false;
+    this.parallelToolCalls = options.parallelToolCalls ?? true;
+    this._concurrency = this.parallelToolCalls === true ? Infinity : this.parallelToolCalls === false ? 1 : this.parallelToolCalls;
     this.maxToolRounds = options.maxToolRounds || 10;
     this.onToolCall = options.onToolCall || null;
     this.onBeforeExecution = options.onBeforeExecution || null;
@@ -1373,8 +1393,7 @@ var ToolAgent = class extends base_default {
       if (response.stop_reason !== "tool_use") break;
       const toolUseBlocks = response.content.filter((b) => b.type === "tool_use");
       if (toolUseBlocks.length === 0) break;
-      const toolResults = [];
-      for (const block of toolUseBlocks) {
+      const tasks = toolUseBlocks.map((block) => async () => {
         if (this.onToolCall) {
           try {
             this.onToolCall(block.name, block.input);
@@ -1387,13 +1406,7 @@ var ToolAgent = class extends base_default {
             const allowed = await this.onBeforeExecution(block.name, block.input);
             if (allowed === false) {
               const result2 = { error: "Execution denied by onBeforeExecution callback" };
-              allToolCalls.push({ name: block.name, args: block.input, result: result2 });
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: block.id,
-                content: JSON.stringify(result2)
-              });
-              continue;
+              return { toolCall: { name: block.name, args: block.input, result: result2 }, toolResult: { type: "tool_result", tool_use_id: block.id, content: JSON.stringify(result2) } };
             }
           } catch (e) {
             logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
@@ -1406,13 +1419,14 @@ var ToolAgent = class extends base_default {
           logger_default.warn(`Tool ${block.name} failed: ${err.message}`);
           result = { error: err.message };
         }
-        allToolCalls.push({ name: block.name, args: block.input, result });
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: typeof result === "string" ? result : JSON.stringify(result)
-        });
-      }
+        return {
+          toolCall: { name: block.name, args: block.input, result },
+          toolResult: { type: "tool_result", tool_use_id: block.id, content: typeof result === "string" ? result : JSON.stringify(result) }
+        };
+      });
+      const results = await runWithConcurrency(tasks, this._concurrency);
+      const toolResults = results.map((r) => r.toolResult);
+      for (const r of results) allToolCalls.push(r.toolCall);
       response = await this._sendMessage(toolResults, { tools: this.tools, ...toolChoice && { tool_choice: toolChoice } });
     }
     this._cumulativeUsage = {
@@ -1472,43 +1486,88 @@ var ToolAgent = class extends base_default {
         return;
       }
       const toolResults = [];
-      for (const block of toolUseBlocks) {
-        if (this._stopped) break;
-        yield { type: "tool_call", toolName: block.name, args: block.input };
-        if (this.onToolCall) {
-          try {
-            this.onToolCall(block.name, block.input);
-          } catch (e) {
-            logger_default.warn(`onToolCall callback error: ${e.message}`);
+      if (this._concurrency === 1) {
+        for (const block of toolUseBlocks) {
+          if (this._stopped) break;
+          yield { type: "tool_call", toolName: block.name, args: block.input };
+          if (this.onToolCall) {
+            try {
+              this.onToolCall(block.name, block.input);
+            } catch (e) {
+              logger_default.warn(`onToolCall callback error: ${e.message}`);
+            }
           }
-        }
-        let denied = false;
-        if (this.onBeforeExecution) {
-          try {
-            const allowed = await this.onBeforeExecution(block.name, block.input);
-            if (allowed === false) denied = true;
-          } catch (e) {
-            logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+          let denied = false;
+          if (this.onBeforeExecution) {
+            try {
+              const allowed = await this.onBeforeExecution(block.name, block.input);
+              if (allowed === false) denied = true;
+            } catch (e) {
+              logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+            }
           }
-        }
-        let result;
-        if (denied) {
-          result = { error: "Execution denied by onBeforeExecution callback" };
-        } else {
-          try {
-            result = await this.toolExecutor(block.name, block.input);
-          } catch (err) {
-            logger_default.warn(`Tool ${block.name} failed: ${err.message}`);
-            result = { error: err.message };
+          let result;
+          if (denied) {
+            result = { error: "Execution denied by onBeforeExecution callback" };
+          } else {
+            try {
+              result = await this.toolExecutor(block.name, block.input);
+            } catch (err) {
+              logger_default.warn(`Tool ${block.name} failed: ${err.message}`);
+              result = { error: err.message };
+            }
           }
+          allToolCalls.push({ name: block.name, args: block.input, result });
+          yield { type: "tool_result", toolName: block.name, result };
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: typeof result === "string" ? result : JSON.stringify(result)
+          });
         }
-        allToolCalls.push({ name: block.name, args: block.input, result });
-        yield { type: "tool_result", toolName: block.name, result };
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: typeof result === "string" ? result : JSON.stringify(result)
+      } else {
+        for (const block of toolUseBlocks) {
+          yield { type: "tool_call", toolName: block.name, args: block.input };
+        }
+        const tasks = toolUseBlocks.map((block) => async () => {
+          if (this.onToolCall) {
+            try {
+              this.onToolCall(block.name, block.input);
+            } catch (e) {
+              logger_default.warn(`onToolCall callback error: ${e.message}`);
+            }
+          }
+          let denied = false;
+          if (this.onBeforeExecution) {
+            try {
+              const allowed = await this.onBeforeExecution(block.name, block.input);
+              if (allowed === false) denied = true;
+            } catch (e) {
+              logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
+            }
+          }
+          let result;
+          if (denied) {
+            result = { error: "Execution denied by onBeforeExecution callback" };
+          } else {
+            try {
+              result = await this.toolExecutor(block.name, block.input);
+            } catch (err) {
+              logger_default.warn(`Tool ${block.name} failed: ${err.message}`);
+              result = { error: err.message };
+            }
+          }
+          return {
+            toolCall: { name: block.name, args: block.input, result },
+            toolResult: { type: "tool_result", tool_use_id: block.id, content: typeof result === "string" ? result : JSON.stringify(result) }
+          };
         });
+        const results = await runWithConcurrency(tasks, this._concurrency);
+        for (const r of results) {
+          allToolCalls.push(r.toolCall);
+          yield { type: "tool_result", toolName: r.toolCall.name, result: r.toolCall.result };
+          toolResults.push(r.toolResult);
+        }
       }
       stream = await this._streamMessage(toolResults, { tools: this.tools, ...toolChoice && { tool_choice: toolChoice } });
     }
