@@ -147,9 +147,8 @@ class ToolAgent extends BaseClaude {
 			const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
 			if (toolUseBlocks.length === 0) break;
 
-			// Execute tools and build tool_result content blocks
-			const toolResults = [];
-			for (const block of toolUseBlocks) {
+			// Execute all tools in parallel
+			const execResults = await Promise.all(toolUseBlocks.map(async (block) => {
 				// Fire onToolCall callback
 				if (this.onToolCall) {
 					try { this.onToolCall(block.name, block.input); }
@@ -161,14 +160,7 @@ class ToolAgent extends BaseClaude {
 					try {
 						const allowed = await this.onBeforeExecution(block.name, block.input);
 						if (allowed === false) {
-							const result = { error: 'Execution denied by onBeforeExecution callback' };
-							allToolCalls.push({ name: block.name, args: block.input, result });
-							toolResults.push({
-								type: 'tool_result',
-								tool_use_id: block.id,
-								content: JSON.stringify(result)
-							});
-							continue;
+							return { block, result: { error: 'Execution denied by onBeforeExecution callback' } };
 						}
 					} catch (e) {
 						log.warn(`onBeforeExecution callback error: ${e.message}`);
@@ -183,14 +175,18 @@ class ToolAgent extends BaseClaude {
 					result = { error: err.message };
 				}
 
-				allToolCalls.push({ name: block.name, args: block.input, result });
+				return { block, result };
+			}));
 
-				toolResults.push({
+			// Collect results in original order and build tool_result content blocks
+			const toolResults = execResults.map(({ block, result }) => {
+				allToolCalls.push({ name: block.name, args: block.input, result });
+				return {
 					type: 'tool_result',
 					tool_use_id: block.id,
 					content: typeof result === 'string' ? result : JSON.stringify(result)
-				});
-			}
+				};
+			});
 
 			// Send tool results back to Claude as user message
 			response = await this._sendMessage(toolResults, { tools: this.tools, ...(toolChoice && { tool_choice: toolChoice }) });
@@ -270,17 +266,20 @@ class ToolAgent extends BaseClaude {
 				return;
 			}
 
-			// Execute tools sequentially so we can yield events
-			const toolResults = [];
+			// Yield tool_call events and fire onToolCall callbacks before executing
 			for (const block of toolUseBlocks) {
 				if (this._stopped) break;
-
 				yield { type: 'tool_call', toolName: block.name, args: block.input };
-
-				// Fire onToolCall callback
 				if (this.onToolCall) {
 					try { this.onToolCall(block.name, block.input); }
 					catch (e) { log.warn(`onToolCall callback error: ${e.message}`); }
+				}
+			}
+
+			// Execute all tools in parallel
+			const execResults = await Promise.all(toolUseBlocks.map(async (block) => {
+				if (this._stopped) {
+					return { block, result: { error: 'Agent was stopped' } };
 				}
 
 				// Check onBeforeExecution gate
@@ -306,9 +305,14 @@ class ToolAgent extends BaseClaude {
 					}
 				}
 
+				return { block, result };
+			}));
+
+			// Yield tool_result events in order and build tool_result content blocks
+			const toolResults = [];
+			for (const { block, result } of execResults) {
 				allToolCalls.push({ name: block.name, args: block.input, result });
 				yield { type: 'tool_result', toolName: block.name, result };
-
 				toolResults.push({
 					type: 'tool_result',
 					tool_use_id: block.id,
