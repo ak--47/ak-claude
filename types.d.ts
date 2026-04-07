@@ -232,9 +232,9 @@ export interface CodeAgentOptions extends BaseClaudeOptions {
   maxRounds?: number;
   /** Per-execution timeout in milliseconds (default: 30000) */
   timeout?: number;
-  /** Async callback before code execution; return false to deny */
-  onBeforeExecution?: (code: string) => Promise<boolean>;
-  /** Notification callback after code execution */
+  /** Async callback before code/bash execution; return false to deny. Receives (content, toolName). */
+  onBeforeExecution?: (content: string, toolName: string) => Promise<boolean> | boolean;
+  /** Notification callback after code/bash execution */
   onCodeExecution?: (code: string, output: { stdout: string; stderr: string; exitCode: number }) => void;
   /** Files whose contents are included in the system prompt for project context */
   importantFiles?: string[];
@@ -246,6 +246,10 @@ export interface CodeAgentOptions extends BaseClaudeOptions {
   comments?: boolean;
   /** Max consecutive failed executions before stopping (default: 3) */
   maxRetries?: number;
+  /** Paths to skill files (markdown) loaded dynamically via the use_skill tool */
+  skills?: string[];
+  /** Plain text environment overview appended to the system prompt — describe the project, stack, conventions, etc. */
+  envOverview?: string;
 }
 
 export interface AgentQueryOptions {
@@ -293,14 +297,52 @@ export interface CodeExecution {
   exitCode: number;
 }
 
+export interface ToolCallResult {
+  /** Which tool produced this result */
+  tool: 'write_code' | 'execute_code' | 'write_and_run_code' | 'fix_code' | 'run_bash' | 'use_skill';
+  /** Code content (for write_code, execute_code, write_and_run_code) */
+  code?: string;
+  /** Purpose slug */
+  purpose?: string;
+  /** Programming language (write_code only) */
+  language?: string;
+  /** Original broken code (fix_code only) */
+  originalCode?: string;
+  /** Corrected code (fix_code only) */
+  fixedCode?: string;
+  /** Fix explanation (fix_code only) */
+  explanation?: string;
+  /** Whether fixed code was executed (fix_code only) */
+  executed?: boolean;
+  /** Shell command (run_bash only) */
+  command?: string;
+  /** Skill name (use_skill only) */
+  skillName?: string;
+  /** Skill content (use_skill only) */
+  content?: string;
+  /** Whether skill was found (use_skill only) */
+  found?: boolean;
+  /** Stdout from execution */
+  stdout?: string;
+  /** Stderr from execution */
+  stderr?: string;
+  /** Exit code from execution */
+  exitCode?: number;
+  /** Whether execution was denied by callback */
+  denied?: boolean;
+}
+
 export interface CodeAgentResponse {
   text: string;
+  /** Backward-compatible: only code executions (execute_code, write_and_run_code, fix_code with execute) */
   codeExecutions: CodeExecution[];
+  /** All tool calls made during this chat turn */
+  toolCalls: ToolCallResult[];
   usage: UsageData | null;
 }
 
 export interface CodeAgentStreamEvent {
-  type: 'text' | 'code' | 'output' | 'done';
+  type: 'text' | 'code' | 'output' | 'write' | 'fix' | 'bash' | 'skill' | 'done';
   text?: string;
   code?: string;
   stdout?: string;
@@ -308,8 +350,27 @@ export interface CodeAgentStreamEvent {
   exitCode?: number;
   fullText?: string;
   codeExecutions?: CodeExecution[];
+  toolCalls?: ToolCallResult[];
   usage?: UsageData | null;
   warning?: string;
+  /** write_code: purpose */
+  purpose?: string;
+  /** write_code: language */
+  language?: string;
+  /** fix_code: original code */
+  originalCode?: string;
+  /** fix_code: fixed code */
+  fixedCode?: string;
+  /** fix_code: explanation */
+  explanation?: string;
+  /** run_bash: command */
+  command?: string;
+  /** use_skill: skill name */
+  skillName?: string;
+  /** use_skill: skill content */
+  content?: string;
+  /** use_skill: whether skill was found */
+  found?: boolean;
 }
 
 // ── Per-Message Options ──────────────────────────────────────────────────────
@@ -519,18 +580,20 @@ export declare class CodeAgent extends BaseClaude {
   workingDirectory: string;
   maxRounds: number;
   timeout: number;
-  onBeforeExecution: ((code: string) => Promise<boolean>) | null;
+  onBeforeExecution: ((content: string, toolName: string) => Promise<boolean> | boolean) | null;
   onCodeExecution: ((code: string, output: { stdout: string; stderr: string; exitCode: number }) => void) | null;
   importantFiles: string[];
   writeDir: string;
   keepArtifacts: boolean;
   comments: boolean;
   codeMaxRetries: number;
+  skills: string[];
+  envOverview: string;
 
   init(force?: boolean): Promise<void>;
   chat(message: string, opts?: Record<string, any>): Promise<CodeAgentResponse>;
   stream(message: string, opts?: Record<string, any>): AsyncGenerator<CodeAgentStreamEvent, void, unknown>;
-  dump(): Array<{ fileName: string; purpose: string | null; script: string; filePath: string | null }>;
+  dump(): Array<{ fileName: string; purpose: string | null; script: string; filePath: string | null; tool: string }>;
   stop(): void;
 }
 

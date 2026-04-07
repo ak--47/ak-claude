@@ -116,15 +116,17 @@ Agent with user-provided tools. Extends BaseClaude.
 - Optional: `maxToolRounds`, `onToolCall`, `onBeforeExecution`, `toolChoice`, `disableParallelToolUse`, `parallelToolCalls`
 
 ### CodeAgent (`code-agent.js`)
-Agent that writes and executes JavaScript autonomously. Extends BaseClaude.
-- `chat(message)` -> `{ text, codeExecutions, usage }`
-- `stream(message)` -> AsyncGenerator yielding `{ type: 'text'|'code'|'output'|'done', ... }`
+Multi-tool coding agent. Extends BaseClaude.
+- `chat(message)` -> `{ text, codeExecutions, toolCalls, usage }`
+- `stream(message)` -> AsyncGenerator yielding `{ type: 'text'|'code'|'output'|'write'|'fix'|'bash'|'skill'|'done', ... }`
 - `stop()` — Cancel the agent and kill any running child process via SIGTERM
-- `dump()` — Returns all scripts with descriptive filenames and purposes
-- `init()` gathers codebase context (file tree + key files + importantFiles) and injects it into system prompt
-- Code executes in Node.js child processes that inherit `process.env`
-- Scripts written to `writeDir` (default: `{workingDirectory}/tmp`) with names like `agent-{purpose}-{timestamp}.mjs`
-- Optional: `workingDirectory`, `maxRounds`, `timeout`, `onBeforeExecution`, `onCodeExecution`, `importantFiles`, `writeDir`, `keepArtifacts`, `comments`, `maxRetries`
+- `dump()` — Returns all executed scripts/commands with tool name, filenames, and purposes
+- `init()` loads skills, gathers codebase context, builds system prompt
+- **6 tools**: `write_code` (output only), `execute_code` (run given code), `write_and_run_code` (autonomous), `fix_code` (structured fix, optional execute), `run_bash` (shell commands), `use_skill` (load skill by name)
+- `use_skill` tool only present when `skills` option is set
+- `onBeforeExecution(content, toolName)` — callback receives content + tool name (breaking change from `(code)`)
+- `toolCalls` array in response tracks all tool invocations with `tool` discriminator; `codeExecutions` kept for backward compat
+- Optional: `workingDirectory`, `maxRounds`, `timeout`, `onBeforeExecution`, `onCodeExecution`, `importantFiles`, `writeDir`, `keepArtifacts`, `comments`, `maxRetries`, `skills`
 
 ### RagAgent (`rag-agent.js`)
 Document Q&A agent with three context input types. Extends BaseClaude.
@@ -383,19 +385,23 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 - AI-powered payload reconstruction via `rebuild()` — sends the bad payload + error message back to Claude for correction
 - `_cumulativeUsage` tracks total tokens across all retry attempts
 
-### Code Execution (CodeAgent)
-- Single `execute_code` tool with `code` + optional `purpose` params — model writes JavaScript, we execute it
-- Scripts written to `writeDir` (default: `{workingDirectory}/tmp`) with names like `agent-read-config-1710000000.mjs`
+### Multi-Tool Code Agent (CodeAgent)
+- **6 tools**: `write_code`, `execute_code`, `write_and_run_code`, `fix_code`, `run_bash`, `use_skill`
+- `write_code` — model outputs code without executing (returned as text)
+- `execute_code` — run given code (e.g., from a previous write_code call)
+- `write_and_run_code` — autonomous: write fresh solution and execute in one step
+- `fix_code` — structured fix with original/fixed/explanation; optional `execute: true` to run the fix
+- `run_bash` — shell commands via `bash -c`; prefer for simple operations (ls, grep, git, npm)
+- `use_skill` — load a skill by name (only present when `skills` option is set)
+- `skills: ['./skills/pattern.md']` — paths to markdown skill files loaded during `init()`; skill names from YAML frontmatter or filename
+- `onBeforeExecution(content, toolName)` — receives content string + tool name (BREAKING: was `(code)`)
+- `toolCalls` array in response: each entry has `tool` discriminator + tool-specific fields
+- `codeExecutions` kept for backward compat (filtered from toolCalls)
+- Scripts written to `writeDir` (default: `{workingDirectory}/tmp`) as `.mjs` files
 - `keepArtifacts: true` preserves scripts on disk; `false` (default) deletes after execution
-- `importantFiles: ['path/to/file.js']` — reads file contents into system prompt for deep project context; supports partial path matching
-- `comments: true` instructs the model to write JSDoc comments; `false` (default) saves tokens
-- `maxRetries: 3` (default `codeMaxRetries`) — tracks consecutive failed executions; on limit, model summarizes failures and asks for user guidance
-- Child processes inherit `process.env` for full environment access
-- `onBeforeExecution` async callback gates execution (return false to deny)
-- `onCodeExecution` notification callback after execution
-- File tree + key files + importantFiles gathered during `init()` for codebase awareness
+- `importantFiles` — reads file contents into system prompt; supports partial path matching
+- `dump()` returns `[{ fileName, purpose, script, filePath, tool }]` across all executions
 - `stop()` kills running child processes via SIGTERM
-- `dump()` returns `[{ fileName, purpose, script, filePath }]` across all executions
 
 ### Document Q&A (RagAgent)
 - Three context input types combined into a single seeded chat history during `init()`:
