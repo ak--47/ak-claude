@@ -9,6 +9,7 @@ import log from './logger.js';
 /**
  * @typedef {import('./types').ChatOptions} ChatOptions
  * @typedef {import('./types').ChatResponse} ChatResponse
+ * @typedef {import('./types').ChatStreamEvent} ChatStreamEvent
  */
 
 /**
@@ -68,6 +69,37 @@ class Chat extends BaseClaude {
 
 		return {
 			text,
+			usage: this.getLastUsage()
+		};
+	}
+
+	/**
+	 * Send a message and stream the response as events.
+	 *
+	 * @param {string} message - The user's message
+	 * @param {Object} [opts={}] - Per-message options
+	 * @yields {ChatStreamEvent}
+	 */
+	async *stream(message, opts = {}) {
+		if (!this._initialized) await this.init();
+
+		let fullText = '';
+		const stream = await this._streamMessage(message, opts);
+		const finalMessage = await stream.finalMessage();
+
+		for (const block of finalMessage.content) {
+			if (block.type === 'text') {
+				fullText += block.text;
+				yield { type: 'text', text: block.text };
+			}
+		}
+
+		this.history.push({ role: 'assistant', content: finalMessage.content });
+		this._captureMetadata(finalMessage);
+
+		yield {
+			type: 'done',
+			fullText,
 			usage: this.getLastUsage()
 		};
 	}

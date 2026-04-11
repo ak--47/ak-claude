@@ -1618,6 +1618,7 @@ var CodeAgent = class extends base_default {
     this.comments = options.comments ?? false;
     this.codeMaxRetries = options.maxRetries ?? 3;
     this.skills = options.skills || [];
+    this.envOverview = options.envOverview || "";
     this._codebaseContext = null;
     this._contextGathered = false;
     this._stopped = false;
@@ -1938,6 +1939,12 @@ ${content}
 
 ## Additional Instructions
 ${this._userSystemPrompt}`;
+    }
+    if (this.envOverview) {
+      prompt += `
+
+## Environment Overview
+${this.envOverview}`;
     }
     return prompt;
   }

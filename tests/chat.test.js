@@ -128,6 +128,48 @@ describe('Chat', () => {
 		});
 	});
 
+	describe('stream()', () => {
+		it('should stream text events and end with done', async () => {
+			const chat = new Chat({ ...BASE_OPTIONS, systemPrompt: 'Be brief.' });
+			const events = [];
+			for await (const event of chat.stream('Say hello')) {
+				events.push(event);
+			}
+			const textEvents = events.filter(e => e.type === 'text');
+			const doneEvents = events.filter(e => e.type === 'done');
+			expect(textEvents.length).toBeGreaterThan(0);
+			expect(doneEvents.length).toBe(1);
+			expect(doneEvents[0].fullText).toBeTruthy();
+		});
+
+		it('should accumulate full text in done event', async () => {
+			const chat = new Chat({ ...BASE_OPTIONS, systemPrompt: 'Reply with one word.' });
+			const events = [];
+			for await (const event of chat.stream('Say hello')) {
+				events.push(event);
+			}
+			const done = events.find(e => e.type === 'done');
+			const accumulated = events.filter(e => e.type === 'text').map(e => e.text).join('');
+			expect(done.fullText).toBe(accumulated);
+		});
+
+		it('should auto-init', async () => {
+			const chat = new Chat({ ...BASE_OPTIONS });
+			for await (const event of chat.stream('Hi')) {
+				// just consume
+			}
+			expect(chat._initialized).toBe(true);
+		});
+
+		it('should maintain history across stream calls', async () => {
+			const chat = new Chat({ ...BASE_OPTIONS, systemPrompt: 'Be brief.' });
+			for await (const _ of chat.stream('My name is Alice')) {}
+			expect(chat.getHistory().length).toBeGreaterThan(0);
+			for await (const _ of chat.stream('What is my name?')) {}
+			expect(chat.getHistory().length).toBeGreaterThan(2);
+		});
+	});
+
 	describe('Concurrent Operations', () => {
 		it('should handle concurrent sends on separate instances', async () => {
 			const chats = Array.from({ length: 3 }, () =>
