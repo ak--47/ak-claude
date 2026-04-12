@@ -126,7 +126,8 @@ Multi-tool coding agent. Extends BaseClaude.
 - `use_skill` tool only present when `skills` option is set
 - `onBeforeExecution(content, toolName)` — callback receives content + tool name (breaking change from `(code)`)
 - `toolCalls` array in response tracks all tool invocations with `tool` discriminator; `codeExecutions` kept for backward compat
-- Optional: `workingDirectory`, `maxRounds`, `timeout`, `onBeforeExecution`, `onCodeExecution`, `importantFiles`, `writeDir`, `keepArtifacts`, `comments`, `maxRetries`, `skills`
+- Optional: `workingDirectory`, `maxRounds`, `timeout`, `onBeforeExecution`, `onCodeExecution`, `importantFiles`, `writeDir`, `keepArtifacts`, `comments`, `maxRetries`, `skills`, `tools`, `toolExecutor`
+- `tools` + `toolExecutor` — add custom tools alongside the built-in 6; dispatched via `toolExecutor(toolName, args)` in the tool loop; stream emits `{ type: 'tool', toolName, args, result, error }`
 
 ### RagAgent (`rag-agent.js`)
 Document Q&A agent with three context input types. Extends BaseClaude.

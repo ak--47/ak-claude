@@ -8,7 +8,7 @@ import BaseClaude from './base.js';
 import log from './logger.js';
 import { execFile } from 'node:child_process';
 import { writeFile, unlink, readdir, readFile, mkdir } from 'node:fs/promises';
-import { join, sep, basename } from 'node:path';
+import { join, sep, basename, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -48,6 +48,17 @@ class CodeAgent extends BaseClaude {
 		this.codeMaxRetries = options.maxRetries ?? 3;
 		this.skills = options.skills || [];
 		this.envOverview = options.envOverview || '';
+
+		// ── Custom tools ──
+		this.customTools = (options.tools || []).map(t => ({
+			name: t.name,
+			description: t.description,
+			input_schema: t.input_schema || t.inputSchema || t.parametersJsonSchema
+		}));
+		this.toolExecutor = options.toolExecutor || null;
+		if (this.customTools.length > 0 && !this.toolExecutor) {
+			throw new Error('CodeAgent: tools provided without a toolExecutor.');
+		}
 
 		// ── Internal state ──
 		this._codebaseContext = null;
@@ -155,6 +166,11 @@ class CodeAgent extends BaseClaude {
 			});
 		}
 
+		// Append custom tools
+		for (const t of this.customTools) {
+			tools.push({ name: t.name, description: t.description, input_schema: t.input_schema });
+		}
+
 		return tools;
 	}
 
@@ -253,7 +269,7 @@ class CodeAgent extends BaseClaude {
 					continue;
 				}
 				try {
-					const fullPath = join(this.workingDirectory, resolved);
+					const fullPath = isAbsolute(resolved) ? resolved : join(this.workingDirectory, resolved);
 					const content = await readFile(fullPath, 'utf-8');
 					importantFileContents.push({ path: resolved, content });
 				} catch (e) {
@@ -270,6 +286,8 @@ class CodeAgent extends BaseClaude {
 	 * @private
 	 */
 	_resolveImportantFile(filename, fileTreeLines) {
+		if (isAbsolute(filename)) return filename;
+
 		const exact = fileTreeLines.find(line => line === filename);
 		if (exact) return exact;
 
@@ -652,12 +670,30 @@ These rules apply when using execute_code, write_and_run_code, or fix_code (with
 					data: { tool: 'use_skill', skillName: skill.name, content: skill.content, found: true }
 				};
 			}
-			default:
+			default: {
+				if (this.toolExecutor) {
+					try {
+						const result = await this.toolExecutor(name, input);
+						const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+						return {
+							output: resultStr,
+							type: 'tool',
+							data: { tool: name, args: input, result }
+						};
+					} catch (err) {
+						return {
+							output: `Tool "${name}" failed: ${err.message}`,
+							type: 'tool',
+							data: { tool: name, args: input, error: err.message }
+						};
+					}
+				}
 				return {
 					output: `Unknown tool: ${name}`,
 					type: 'unknown',
 					data: { tool: name }
 				};
+			}
 		}
 	}
 
@@ -850,6 +886,11 @@ These rules apply when using execute_code, write_and_run_code, or fix_code (with
 				// Emit skill event
 				if (toolName === 'use_skill') {
 					yield { type: 'skill', skillName: data.skillName, content: data.content, found: data.found };
+				}
+
+				// Emit custom tool event
+				if (type === 'tool') {
+					yield { type: 'tool', toolName, args: data.args, result: data.result, error: data.error };
 				}
 
 				// Track consecutive failures
