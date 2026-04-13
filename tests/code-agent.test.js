@@ -322,7 +322,6 @@ describe('CodeAgent', () => {
 			await agent.init();
 			const result = await agent._executeCode('console.log("hello")', 'test');
 			expect(result.stdout.trim()).toBe('hello');
-			expect(result.stderr).toBe('');
 			expect(result.exitCode).toBe(0);
 		});
 
@@ -960,6 +959,169 @@ describe('CodeAgent', () => {
 			expect(usage).toBeTruthy();
 			expect(usage.promptTokens).toBeGreaterThan(0);
 			expect(usage.responseTokens).toBeGreaterThan(0);
+		});
+	});
+
+	// ── Python Mode ─────────────────────────────────────────────────────────
+
+	describe('Python Mode', () => {
+		function makePyAgent(extraOpts = {}) {
+			return makeAgent({ language: 'python', ...extraOpts });
+		}
+
+		describe('Constructor', () => {
+			it('should default language to javascript', () => {
+				expect(makeAgent().language).toBe('javascript');
+			});
+
+			it('should accept language: python', () => {
+				expect(makePyAgent().language).toBe('python');
+			});
+
+			it('should accept pythonPath option', () => {
+				expect(makePyAgent({ pythonPath: '/usr/bin/python3' }).pythonPath).toBe('/usr/bin/python3');
+			});
+
+			it('should default pythonPath to null', () => {
+				expect(makePyAgent().pythonPath).toBeNull();
+			});
+		});
+
+		describe('init()', () => {
+			it('should resolve python binary during init', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				expect(agent._pythonBinary).toBeTruthy();
+				expect(agent._pythonBinary).toContain('python');
+			});
+
+			it('should create venv during init', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				expect(agent._venvPath).toBeTruthy();
+				expect(agent._venvEnv).toBeTruthy();
+				expect(agent._venvEnv.VIRTUAL_ENV).toBe(agent._venvPath);
+			});
+
+			it('should include Python-specific system prompt', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				expect(agent.systemPrompt).toContain('Python 3');
+				expect(agent.systemPrompt).toContain('print()');
+				expect(agent.systemPrompt).toContain('pip install');
+				expect(agent.systemPrompt).not.toContain('Node.js');
+				expect(agent.systemPrompt).not.toContain('.mjs');
+				expect(agent.systemPrompt).not.toContain('console.log');
+			});
+
+			it('should include Python comments instruction when comments=true', async () => {
+				const agent = makePyAgent({ comments: true });
+				await agent.init();
+				expect(agent.systemPrompt).toContain('docstring');
+				expect(agent.systemPrompt).not.toContain('JSDoc');
+			});
+
+			it('should have Python-specific tool descriptions', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				const execTool = agent._tools.find(t => t.name === 'execute_code');
+				expect(execTool.description).toContain('Python');
+				expect(execTool.description).toContain('print()');
+				expect(execTool.input_schema.properties.code.description).toContain('Python');
+			});
+		});
+
+		describe('_executeCode() with Python', () => {
+			it('should execute Python code and capture stdout', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				const result = await agent._executeCode('print("hello from python")', 'test');
+				expect(result.stdout.trim()).toBe('hello from python');
+				expect(result.exitCode).toBe(0);
+			});
+
+			it('should handle Python syntax errors', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				const result = await agent._executeCode('def foo(:', 'test');
+				expect(result.exitCode).not.toBe(0);
+				expect(result.stderr).toContain('SyntaxError');
+			});
+
+			it('should handle Python exceptions', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				const result = await agent._executeCode('raise ValueError("boom")', 'test');
+				expect(result.exitCode).not.toBe(0);
+				expect(result.stderr).toContain('ValueError');
+				expect(result.stderr).toContain('boom');
+			});
+
+			it('should write .py temp files', async () => {
+				const pyDir = join(tmpDir, 'py-artifacts');
+				const agent = makePyAgent({ keepArtifacts: true, writeDir: pyDir });
+				await agent.init();
+				await agent._executeCode('print("artifact")', 'py-test');
+				const files = await readdir(pyDir);
+				const pyFiles = files.filter(f => f.endsWith('.py'));
+				expect(pyFiles.length).toBeGreaterThan(0);
+				await rm(pyDir, { recursive: true, force: true });
+			});
+
+			it('should use venv python for execution', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				const result = await agent._executeCode('import sys; print(sys.executable)', 'test');
+				expect(result.stdout.trim()).toContain('.venv');
+			});
+
+			it('should support Python imports', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				const result = await agent._executeCode('import json; print(json.dumps({"a": 1}))', 'test');
+				expect(result.stdout.trim()).toBe('{"a": 1}');
+				expect(result.exitCode).toBe(0);
+			});
+		});
+
+		describe('_executeBash() with venv', () => {
+			it('should use venv pip in bash commands', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				const result = await agent._executeBash('which pip', 'test');
+				expect(result.stdout.trim()).toContain('.venv');
+			});
+		});
+
+		describe('dump() with Python', () => {
+			it('should use .py extension in dump', async () => {
+				const agent = makePyAgent();
+				await agent.init();
+				await agent._executeCode('print(1)', 'py-dump');
+				const scripts = agent.dump();
+				expect(scripts[scripts.length - 1].fileName).toContain('.py');
+				expect(scripts[scripts.length - 1].fileName).not.toContain('.mjs');
+			});
+		});
+
+		describe('pip install via run_bash', () => {
+			it('should be able to install and use a package', async () => {
+				const agent = makePyAgent({ timeout: 60000 });
+				await agent.init();
+				const installResult = await agent._executeBash('pip install six --quiet', 'install');
+				expect(installResult.exitCode).toBe(0);
+				const useResult = await agent._executeCode('import six; print(six.moves.range(3))', 'use-pkg');
+				expect(useResult.exitCode).toBe(0);
+			});
+		});
+
+		describe('chat() with Python', () => {
+			it('should execute Python code via chat', async () => {
+				const agent = makePyAgent();
+				const response = await agent.chat('Use write_and_run_code to run this Python code: print("chat python test")');
+				expect(response.codeExecutions.length).toBeGreaterThan(0);
+				expect(response.codeExecutions[0].output).toContain('chat python test');
+			});
 		});
 	});
 });

@@ -1622,7 +1622,55 @@ var import_node_path = require("node:path");
 var import_node_crypto = require("node:crypto");
 var MAX_OUTPUT_CHARS = 5e4;
 var MAX_FILE_TREE_LINES = 500;
-var IGNORE_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "coverage", ".next", "build", "__pycache__"]);
+var IGNORE_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "coverage", ".next", "build", "__pycache__", ".venv"]);
+var LANG_CONFIG = {
+  javascript: {
+    toolDescExecute: "Execute a given piece of JavaScript code in a Node.js child process. Use this when you already have code to run \u2014 e.g., running code from a previous write_code call, re-running a snippet, or executing code the user provided. Use console.log() for output.",
+    toolDescWriteAndRun: "Write a fresh solution from scratch and execute it in one step. Use this when you need to figure out the code AND run it \u2014 the autonomous, end-to-end tool for solving problems with code.",
+    codeParamDesc: "JavaScript code to execute. Use console.log() for output. Use import syntax (ES modules).",
+    codeRules: `- Your code runs in a Node.js child process with access to all built-in modules
+- IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
+  - import fs from 'fs';
+  - import path from 'path';
+  - import { execSync } from 'child_process';
+- Use console.log() to produce output \u2014 that's how results are returned to you
+- Write efficient scripts that do multiple things per execution when possible
+- For parallel async operations, use Promise.all()
+- Handle errors in your scripts with try/catch so you get useful error messages
+- Top-level await is supported`,
+    commentsEnabled: `- Add a JSDoc @fileoverview comment at the top of each script explaining what it does
+- Add brief JSDoc @param comments for any functions you define`,
+    commentsDisabled: `- Do NOT write any comments in your code \u2014 save tokens. The code should be self-explanatory.`,
+    packageLabel: "Available Packages",
+    packageIntro: "These npm packages are installed and can be imported",
+    bashExamples: "ls, grep, curl, git, npm, cat",
+    codeBlockLang: "javascript",
+    execToolSummary: "Run a given piece of JavaScript code. Use when you already have code to run \u2014 e.g., from a previous write_code call, re-running a snippet, or executing user-provided code.",
+    writeRunToolSummary: "Write a fresh solution from scratch and execute it in one step. The autonomous, end-to-end tool for solving problems with code."
+  },
+  python: {
+    toolDescExecute: "Execute a given piece of Python code in a child process. Use this when you already have code to run \u2014 e.g., running code from a previous write_code call, re-running a snippet, or executing code the user provided. Use print() for output.",
+    toolDescWriteAndRun: "Write a fresh Python solution from scratch and execute it in one step. Use this when you need to figure out the code AND run it \u2014 the autonomous, end-to-end tool for solving problems with code.",
+    codeParamDesc: "Python code to execute. Use print() for output.",
+    codeRules: `- Your code runs in a Python 3 child process
+- Use print() to produce output \u2014 that's how results are returned to you
+- Use standard Python imports (import os, import json, from pathlib import Path, etc.)
+- Write efficient scripts; prefer list comprehensions and built-in functions
+- For async operations, use asyncio
+- Handle errors with try/except so you get useful error messages
+- A virtual environment is active \u2014 you can install packages using run_bash with: pip install <package>
+- Installed packages persist across executions in this session`,
+    commentsEnabled: `- Add a module-level docstring at the top of each script explaining what it does
+- Add brief docstrings for any functions you define`,
+    commentsDisabled: `- Do NOT write any comments in your code \u2014 save tokens. The code should be self-explanatory.`,
+    packageLabel: "Available Packages",
+    packageIntro: "These Python packages are available for import",
+    bashExamples: "ls, grep, curl, git, pip, cat",
+    codeBlockLang: "python",
+    execToolSummary: "Run a given piece of Python code. Use when you already have code to run \u2014 e.g., from a previous write_code call, re-running a snippet, or executing user-provided code.",
+    writeRunToolSummary: "Write a fresh Python solution from scratch and execute it in one step. The autonomous, end-to-end tool for solving problems with code."
+  }
+};
 var EXECUTING_TOOLS = /* @__PURE__ */ new Set(["execute_code", "write_and_run_code", "run_bash"]);
 var CodeAgent = class extends base_default {
   /**
@@ -1634,6 +1682,8 @@ var CodeAgent = class extends base_default {
     }
     super(options);
     this.workingDirectory = options.workingDirectory || process.cwd();
+    this.language = options.language || "javascript";
+    this.pythonPath = options.pythonPath || null;
     this.maxRounds = options.maxRounds || 10;
     this.timeout = options.timeout || 3e4;
     this.onBeforeExecution = options.onBeforeExecution || null;
@@ -1645,6 +1695,9 @@ var CodeAgent = class extends base_default {
     this.codeMaxRetries = options.maxRetries ?? 3;
     this.skills = options.skills || [];
     this.envOverview = options.envOverview || "";
+    this._pythonBinary = null;
+    this._venvPath = null;
+    this._venvEnv = null;
     this.customTools = (options.tools || []).map((t) => ({
       name: t.name,
       description: t.description,
@@ -1672,6 +1725,7 @@ var CodeAgent = class extends base_default {
    * @returns {Array<{name: string, description: string, input_schema: Object}>}
    */
   _buildToolDefinitions() {
+    const lang = LANG_CONFIG[this.language] || LANG_CONFIG.javascript;
     const tools = [
       {
         name: "write_code",
@@ -1688,11 +1742,11 @@ var CodeAgent = class extends base_default {
       },
       {
         name: "execute_code",
-        description: "Execute a given piece of JavaScript code in a Node.js child process. Use this when you already have code to run \u2014 e.g., running code from a previous write_code call, re-running a snippet, or executing code the user provided. Use console.log() for output.",
+        description: lang.toolDescExecute,
         input_schema: {
           type: "object",
           properties: {
-            code: { type: "string", description: "JavaScript code to execute. Use console.log() for output. Use import syntax (ES modules)." },
+            code: { type: "string", description: lang.codeParamDesc },
             purpose: { type: "string", description: 'A short 2-4 word slug describing what this script does (e.g., "read-config", "parse-logs").' }
           },
           required: ["code"]
@@ -1700,11 +1754,11 @@ var CodeAgent = class extends base_default {
       },
       {
         name: "write_and_run_code",
-        description: "Write a fresh solution from scratch and execute it in one step. Use this when you need to figure out the code AND run it \u2014 the autonomous, end-to-end tool for solving problems with code.",
+        description: lang.toolDescWriteAndRun,
         input_schema: {
           type: "object",
           properties: {
-            code: { type: "string", description: "JavaScript code to write and execute. Use console.log() for output. Use import syntax (ES modules)." },
+            code: { type: "string", description: lang.codeParamDesc },
             purpose: { type: "string", description: 'A short 2-4 word slug describing what this script does (e.g., "fetch-api-data", "generate-report").' }
           },
           required: ["code"]
@@ -1726,7 +1780,7 @@ var CodeAgent = class extends base_default {
       },
       {
         name: "run_bash",
-        description: "Execute a shell command in the working directory. Use this for file operations, git commands, installing packages, or any shell task. Prefer this over execute_code for simple shell operations.",
+        description: `Execute a shell command in the working directory. Use this for file operations, git commands, installing packages, or any shell task (e.g., ${lang.bashExamples}). Prefer this over execute_code for simple shell operations.`,
         input_schema: {
           type: "object",
           properties: {
@@ -1766,6 +1820,10 @@ var CodeAgent = class extends base_default {
     if (this.skills.length > 0 && (this._skillRegistry.size === 0 || force)) {
       await this._loadSkills();
     }
+    if (this.language === "python" && (!this._pythonBinary || force)) {
+      await this._resolvePython();
+      await this._setupVenv();
+    }
     this._tools = this._buildToolDefinitions();
     if (!this._contextGathered || force) {
       await this._gatherCodebaseContext();
@@ -1793,6 +1851,70 @@ var CodeAgent = class extends base_default {
       }
     }
   }
+  // ── Python Resolution ───────────────────────────────────────────────────
+  /**
+   * Resolve the Python 3 binary path.
+   * @private
+   */
+  async _resolvePython() {
+    const tryBinary = (bin) => new Promise((resolve2) => {
+      (0, import_node_child_process.execFile)(bin, ["--version"], { timeout: 5e3 }, (err, stdout, stderr) => {
+        if (err) return resolve2(null);
+        const output = (stdout || "") + (stderr || "");
+        if (output.includes("Python 3.")) return resolve2(bin);
+        resolve2(null);
+      });
+    });
+    if (this.pythonPath) {
+      const result = await tryBinary(this.pythonPath);
+      if (result) {
+        this._pythonBinary = result;
+        return;
+      }
+      throw new Error(`CodeAgent: pythonPath "${this.pythonPath}" is not a valid Python 3 binary.`);
+    }
+    const python3 = await tryBinary("python3");
+    if (python3) {
+      this._pythonBinary = python3;
+      return;
+    }
+    const python = await tryBinary("python");
+    if (python) {
+      this._pythonBinary = python;
+      return;
+    }
+    throw new Error('CodeAgent: language is "python" but python3 was not found on PATH. Install Python 3 or provide the pythonPath option.');
+  }
+  /**
+   * Create a virtual environment for Python execution.
+   * @private
+   */
+  async _setupVenv() {
+    await (0, import_promises2.mkdir)(this.writeDir, { recursive: true });
+    this._venvPath = (0, import_node_path.join)(this.writeDir, ".venv");
+    const isWin = process.platform === "win32";
+    const venvBin = isWin ? (0, import_node_path.join)(this._venvPath, "Scripts") : (0, import_node_path.join)(this._venvPath, "bin");
+    const venvPython = (0, import_node_path.join)(venvBin, isWin ? "python.exe" : "python");
+    try {
+      await (0, import_promises2.readFile)(venvPython);
+    } catch {
+      logger_default.debug(`Creating Python venv at ${this._venvPath}`);
+      await new Promise((resolve2, reject) => {
+        (0, import_node_child_process.execFile)(this._pythonBinary, ["-m", "venv", this._venvPath], {
+          timeout: 3e4
+        }, (err) => {
+          if (err) return reject(new Error(`CodeAgent: failed to create venv: ${err.message}`));
+          resolve2();
+        });
+      });
+    }
+    const env = Object.assign({}, process.env);
+    env.VIRTUAL_ENV = this._venvPath;
+    env.PATH = venvBin + (isWin ? ";" : ":") + (process.env.PATH || "");
+    this._venvEnv = env;
+    this._pythonBinary = venvPython;
+    logger_default.debug(`Python venv ready at ${this._venvPath}`);
+  }
   // ── Context Gathering ────────────────────────────────────────────────────
   /**
    * @private
@@ -1811,15 +1933,35 @@ var CodeAgent = class extends base_default {
       fileTree = `${truncated}
 ... (${lines.length - MAX_FILE_TREE_LINES} more files)`;
     }
-    let npmPackages = [];
-    try {
-      const pkgPath = (0, import_node_path.join)(this.workingDirectory, "package.json");
-      const pkg = JSON.parse(await (0, import_promises2.readFile)(pkgPath, "utf-8"));
-      npmPackages = [
-        ...Object.keys(pkg.dependencies || {}),
-        ...Object.keys(pkg.devDependencies || {})
-      ];
-    } catch {
+    let packages = [];
+    if (this.language === "python") {
+      try {
+        const reqPath = (0, import_node_path.join)(this.workingDirectory, "requirements.txt");
+        const content = await (0, import_promises2.readFile)(reqPath, "utf-8");
+        packages = content.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && !l.startsWith("-")).map((l) => l.split(/[>=<!\[;\s]/)[0]);
+      } catch {
+      }
+      if (packages.length === 0) {
+        try {
+          const ppPath = (0, import_node_path.join)(this.workingDirectory, "pyproject.toml");
+          const content = await (0, import_promises2.readFile)(ppPath, "utf-8");
+          const depMatch = content.match(/dependencies\s*=\s*\[([\s\S]*?)\]/);
+          if (depMatch) {
+            packages = (depMatch[1].match(/"([^"]+)"/g) || []).map((s) => s.replace(/"/g, "").split(/[>=<!\[;\s]/)[0]);
+          }
+        } catch {
+        }
+      }
+    } else {
+      try {
+        const pkgPath = (0, import_node_path.join)(this.workingDirectory, "package.json");
+        const pkg = JSON.parse(await (0, import_promises2.readFile)(pkgPath, "utf-8"));
+        packages = [
+          ...Object.keys(pkg.dependencies || {}),
+          ...Object.keys(pkg.devDependencies || {})
+        ];
+      } catch {
+      }
     }
     const importantFileContents = [];
     if (this.importantFiles.length > 0) {
@@ -1839,7 +1981,7 @@ var CodeAgent = class extends base_default {
         }
       }
     }
-    this._codebaseContext = { fileTree, npmPackages, importantFileContents };
+    this._codebaseContext = { fileTree, npmPackages: packages, packages, importantFileContents };
     this._contextGathered = true;
   }
   /**
@@ -1897,7 +2039,8 @@ var CodeAgent = class extends base_default {
    * @private
    */
   _buildSystemPrompt() {
-    const { fileTree, npmPackages, importantFileContents } = this._codebaseContext || { fileTree: "", npmPackages: [], importantFileContents: [] };
+    const { fileTree, packages, importantFileContents } = this._codebaseContext || { fileTree: "", packages: [], importantFileContents: [] };
+    const lang = LANG_CONFIG[this.language] || LANG_CONFIG.javascript;
     let prompt = `You are a coding agent working in ${this.workingDirectory}.
 
 ## Available Tools
@@ -1906,16 +2049,16 @@ var CodeAgent = class extends base_default {
 Output code without executing it. Use when showing, proposing, or presenting code to the user.
 
 ### execute_code
-Run a given piece of JavaScript code. Use when you already have code to run \u2014 e.g., from a previous write_code call, re-running a snippet, or executing user-provided code.
+${lang.execToolSummary}
 
 ### write_and_run_code
-Write a fresh solution from scratch and execute it in one step. The autonomous, end-to-end tool for solving problems with code.
+${lang.writeRunToolSummary}
 
 ### fix_code
 Fix broken code by providing original and fixed versions. Set execute=true to verify the fix works.
 
 ### run_bash
-Run shell commands directly (e.g., ls, grep, curl, git, npm, cat). Prefer this over execute_code for simple shell operations.`;
+Run shell commands directly (e.g., ${lang.bashExamples}). Prefer this over execute_code for simple shell operations.`;
     if (this._skillRegistry.size > 0) {
       prompt += `
 
@@ -1927,24 +2070,14 @@ Load a skill by name to get detailed instructions and templates. Available skill
 ## Code Execution Rules
 These rules apply when using execute_code, write_and_run_code, or fix_code (with execute=true):
 - Always provide a short descriptive \`purpose\` parameter (2-4 word slug like "read-config")
-- Your code runs in a Node.js child process with access to all built-in modules
-- IMPORTANT: Your code runs as an ES module (.mjs). Use import syntax, NOT require():
-  - import fs from 'fs';
-  - import path from 'path';
-  - import { execSync } from 'child_process';
-- Use console.log() to produce output \u2014 that's how results are returned to you
-- Write efficient scripts that do multiple things per execution when possible
-- For parallel async operations, use Promise.all()
-- Handle errors in your scripts with try/catch so you get useful error messages
-- Top-level await is supported
+${lang.codeRules}
 - The working directory is: ${this.workingDirectory}`;
     if (this.comments) {
       prompt += `
-- Add a JSDoc @fileoverview comment at the top of each script explaining what it does
-- Add brief JSDoc @param comments for any functions you define`;
+${lang.commentsEnabled}`;
     } else {
       prompt += `
-- Do NOT write any comments in your code \u2014 save tokens. The code should be self-explanatory.`;
+${lang.commentsDisabled}`;
     }
     if (fileTree) {
       prompt += `
@@ -1954,11 +2087,11 @@ These rules apply when using execute_code, write_and_run_code, or fix_code (with
 ${fileTree}
 \`\`\``;
     }
-    if (npmPackages.length > 0) {
+    if (packages && packages.length > 0) {
       prompt += `
 
-## Available Packages
-These npm packages are installed and can be imported: ${npmPackages.join(", ")}`;
+## ${lang.packageLabel}
+${lang.packageIntro}: ${packages.join(", ")}`;
     }
     if (importantFileContents && importantFileContents.length > 0) {
       prompt += `
@@ -1968,7 +2101,7 @@ These npm packages are installed and can be imported: ${npmPackages.join(", ")}`
         prompt += `
 
 ### ${filePath}
-\`\`\`javascript
+\`\`\`${lang.codeBlockLang}
 ${content}
 \`\`\``;
       }
@@ -2014,14 +2147,17 @@ ${this.envOverview}`;
     }
     await (0, import_promises2.mkdir)(this.writeDir, { recursive: true });
     const slug = this._slugify(purpose);
-    const tempFile = (0, import_node_path.join)(this.writeDir, `agent-${slug}-${Date.now()}.mjs`);
+    const ext = this.language === "python" ? ".py" : ".mjs";
+    const tempFile = (0, import_node_path.join)(this.writeDir, `agent-${slug}-${Date.now()}${ext}`);
     try {
       await (0, import_promises2.writeFile)(tempFile, code, "utf-8");
+      const binary = this.language === "python" ? this._pythonBinary : "node";
+      const execEnv = this.language === "python" && this._venvEnv ? this._venvEnv : process.env;
       const result = await new Promise((resolve2) => {
-        const child = (0, import_node_child_process.execFile)("node", [tempFile], {
+        const child = (0, import_node_child_process.execFile)(binary, [tempFile], {
           cwd: this.workingDirectory,
           timeout: this.timeout,
-          env: process.env,
+          env: execEnv,
           maxBuffer: 10 * 1024 * 1024
         }, (err, stdout, stderr) => {
           this._activeProcess = null;
@@ -2092,11 +2228,12 @@ ${this.envOverview}`;
         logger_default.warn(`onBeforeExecution callback error: ${e.message}`);
       }
     }
+    const execEnv = this.language === "python" && this._venvEnv ? this._venvEnv : process.env;
     const result = await new Promise((resolve2) => {
       const child = (0, import_node_child_process.execFile)("bash", ["-c", command], {
         cwd: this.workingDirectory,
         timeout: this.timeout,
-        env: process.env,
+        env: execEnv,
         maxBuffer: 10 * 1024 * 1024
       }, (err, stdout, stderr) => {
         this._activeProcess = null;
@@ -2461,8 +2598,9 @@ ${this.envOverview}`;
    * @returns {Array<{fileName: string, purpose: string|null, script: string, filePath: string|null, tool: string}>}
    */
   dump() {
+    const ext = this.language === "python" ? ".py" : ".mjs";
     return this._allExecutions.map((exec, i) => ({
-      fileName: exec.purpose ? `agent-${exec.purpose}.mjs` : `script-${i + 1}.mjs`,
+      fileName: exec.purpose ? `agent-${exec.purpose}${ext}` : `script-${i + 1}${ext}`,
       purpose: exec.purpose || null,
       script: exec.code,
       filePath: exec.filePath || null,
