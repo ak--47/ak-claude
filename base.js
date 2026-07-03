@@ -427,6 +427,7 @@ class BaseClaude {
 	 * @param {string} [opts.contextKey='CONTEXT'] - Key for optional context
 	 * @param {string} [opts.explanationKey='EXPLANATION'] - Key for optional explanations
 	 * @param {string} [opts.systemPromptKey='SYSTEM'] - Key for system prompt overrides
+	 * @param {'json'|'text'} [opts.format='json'] - Assistant-turn format: 'json' wraps answers in a {data} envelope (Transformer protocol); 'text' stores ANSWER verbatim (prose agents like Chat)
 	 * @returns {Promise<Array>} The updated history
 	 */
 	async seed(examples, opts = {}) {
@@ -442,6 +443,7 @@ class BaseClaude {
 		const contextKey = opts.contextKey || 'CONTEXT';
 		const explanationKey = opts.explanationKey || 'EXPLANATION';
 		const systemPromptKey = opts.systemPromptKey || 'SYSTEM';
+		const format = opts.format || 'json';
 
 		// Check for system prompt override in examples
 		const instructionExample = examples.find(ex => ex[systemPromptKey]);
@@ -471,9 +473,15 @@ class BaseClaude {
 				userText += promptText;
 			}
 
-			if (answerValue) modelResponse.data = answerValue;
-			if (explanationValue) modelResponse.explanation = explanationValue;
-			const modelText = JSON.stringify(modelResponse, null, 2);
+			let modelText;
+			if (format === 'text') {
+				modelText = isJSON(answerValue) ? JSON.stringify(answerValue, null, 2) : String(answerValue || '');
+				if (explanationValue) log.warn('seed(): EXPLANATION has no representation in text format; ignored.');
+			} else {
+				if (answerValue) modelResponse.data = answerValue;
+				if (explanationValue) modelResponse.explanation = explanationValue;
+				modelText = JSON.stringify(modelResponse, null, 2);
+			}
 
 			if (userText.trim().length && modelText.trim().length > 0) {
 				historyToAdd.push({ role: 'user', content: userText.trim() });
