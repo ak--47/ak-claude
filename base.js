@@ -20,13 +20,27 @@ import { isJSON } from './json-helpers.js';
 
 const DEFAULT_MAX_TOKENS = 8192;
 
-/** Model pricing per million tokens (as of March 2026) */
+/**
+ * Model pricing per million tokens (as of July 2026).
+ * Bare IDs (no date suffix) match both the direct API and Vertex AI publisher
+ * model IDs for current-generation models. Vertex dated snapshots use an
+ * `@` separator (e.g. claude-opus-4-5@20250514) — add entries as needed.
+ */
 const MODEL_PRICING = {
+	// Claude 5 family
+	'claude-fable-5': { input: 10.00, output: 50.00 },
+	'claude-sonnet-5': { input: 3.00, output: 15.00 }, // intro pricing ($2/$10) through 2026-08-31 not modelled
+	// Opus 4.x
+	'claude-opus-4-8': { input: 5.00, output: 25.00 },
+	'claude-opus-4-7': { input: 5.00, output: 25.00 },
+	'claude-opus-4-6': { input: 5.00, output: 25.00 },
+	'claude-opus-4-5-20250514': { input: 15.00, output: 75.00 },
+	// Sonnet 4.x
 	'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
 	'claude-sonnet-4-5-20250514': { input: 3.00, output: 15.00 },
-	'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00 },
-	'claude-opus-4-6': { input: 15.00, output: 75.00 },
-	'claude-opus-4-5-20250514': { input: 15.00, output: 75.00 },
+	// Haiku
+	'claude-haiku-4-5': { input: 1.00, output: 5.00 },
+	'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
 };
 
 export { MODEL_PRICING, DEFAULT_MAX_TOKENS };

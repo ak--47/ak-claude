@@ -64,8 +64,8 @@
 	],
 	"license": "ISC",
 	"dependencies": {
-		"@anthropic-ai/sdk": "^0.52.0",
-		"@anthropic-ai/vertex-sdk": "^0.14.4",
+		"@anthropic-ai/sdk": "^0.110.0",
+		"@anthropic-ai/vertex-sdk": "^0.19.0",
 		"dotenv": "^17.3.1",
 		"pino": "^10.3.1",
 		"pino-pretty": "^13.1.3"

@@ -312,11 +312,21 @@ import_dotenv.default.config({ quiet: true });
 var { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
 var DEFAULT_MAX_TOKENS = 8192;
 var MODEL_PRICING = {
+  // Claude 5 family
+  "claude-fable-5": { input: 10, output: 50 },
+  "claude-sonnet-5": { input: 3, output: 15 },
+  // intro pricing ($2/$10) through 2026-08-31 not modelled
+  // Opus 4.x
+  "claude-opus-4-8": { input: 5, output: 25 },
+  "claude-opus-4-7": { input: 5, output: 25 },
+  "claude-opus-4-6": { input: 5, output: 25 },
+  "claude-opus-4-5-20250514": { input: 15, output: 75 },
+  // Sonnet 4.x
   "claude-sonnet-4-6": { input: 3, output: 15 },
   "claude-sonnet-4-5-20250514": { input: 3, output: 15 },
-  "claude-haiku-4-5-20251001": { input: 0.8, output: 4 },
-  "claude-opus-4-6": { input: 15, output: 75 },
-  "claude-opus-4-5-20250514": { input: 15, output: 75 }
+  // Haiku
+  "claude-haiku-4-5": { input: 1, output: 5 },
+  "claude-haiku-4-5-20251001": { input: 1, output: 5 }
 };
 var BaseClaude = class {
   /**
