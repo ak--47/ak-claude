@@ -48,6 +48,19 @@ class Chat extends BaseClaude {
 	}
 
 	/**
+	 * Seeds the conversation with example pairs stored as plain prose turns.
+	 * Chat is a prose agent — assistant turns are stored verbatim, not wrapped in
+	 * Transformer's {data} JSON envelope.
+	 *
+	 * @param {import('./types').TransformationExample[]} [examples]
+	 * @param {import('./types').SeedOptions} [opts={}]
+	 * @returns {Promise<Array>} The updated history
+	 */
+	async seed(examples, opts = {}) {
+		return super.seed(examples, { format: 'text', ...opts });
+	}
+
+	/**
 	 * Send a text message and get a response. Adds to conversation history.
 	 *
 	 * @param {string} message - The user's message

@@ -478,6 +478,8 @@ export interface SeedOptions {
   contextKey?: string;
   explanationKey?: string;
   systemPromptKey?: string;
+  /** Assistant-turn format: 'json' wraps answers in a {data} envelope (Transformer protocol); 'text' stores ANSWER verbatim (prose agents like Chat). Default: 'json' */
+  format?: 'json' | 'text';
 }
 
 // ── Class Declarations ───────────────────────────────────────────────────────

@@ -20,13 +20,27 @@ import { isJSON } from './json-helpers.js';
 
 const DEFAULT_MAX_TOKENS = 8192;
 
-/** Model pricing per million tokens (as of March 2026) */
+/**
+ * Model pricing per million tokens (as of July 2026).
+ * Bare IDs (no date suffix) match both the direct API and Vertex AI publisher
+ * model IDs for current-generation models. Vertex dated snapshots use an
+ * `@` separator (e.g. claude-opus-4-5@20250514) — add entries as needed.
+ */
 const MODEL_PRICING = {
+	// Claude 5 family
+	'claude-fable-5': { input: 10.00, output: 50.00 },
+	'claude-sonnet-5': { input: 3.00, output: 15.00 }, // intro pricing ($2/$10) through 2026-08-31 not modelled
+	// Opus 4.x
+	'claude-opus-4-8': { input: 5.00, output: 25.00 },
+	'claude-opus-4-7': { input: 5.00, output: 25.00 },
+	'claude-opus-4-6': { input: 5.00, output: 25.00 },
+	'claude-opus-4-5-20250514': { input: 15.00, output: 75.00 },
+	// Sonnet 4.x
 	'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
 	'claude-sonnet-4-5-20250514': { input: 3.00, output: 15.00 },
-	'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00 },
-	'claude-opus-4-6': { input: 15.00, output: 75.00 },
-	'claude-opus-4-5-20250514': { input: 15.00, output: 75.00 },
+	// Haiku
+	'claude-haiku-4-5': { input: 1.00, output: 5.00 },
+	'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
 };
 
 export { MODEL_PRICING, DEFAULT_MAX_TOKENS };
@@ -427,6 +441,7 @@ class BaseClaude {
 	 * @param {string} [opts.contextKey='CONTEXT'] - Key for optional context
 	 * @param {string} [opts.explanationKey='EXPLANATION'] - Key for optional explanations
 	 * @param {string} [opts.systemPromptKey='SYSTEM'] - Key for system prompt overrides
+	 * @param {'json'|'text'} [opts.format='json'] - Assistant-turn format: 'json' wraps answers in a {data} envelope (Transformer protocol); 'text' stores ANSWER verbatim (prose agents like Chat)
 	 * @returns {Promise<Array>} The updated history
 	 */
 	async seed(examples, opts = {}) {
@@ -442,6 +457,7 @@ class BaseClaude {
 		const contextKey = opts.contextKey || 'CONTEXT';
 		const explanationKey = opts.explanationKey || 'EXPLANATION';
 		const systemPromptKey = opts.systemPromptKey || 'SYSTEM';
+		const format = opts.format || 'json';
 
 		// Check for system prompt override in examples
 		const instructionExample = examples.find(ex => ex[systemPromptKey]);
@@ -471,9 +487,15 @@ class BaseClaude {
 				userText += promptText;
 			}
 
-			if (answerValue) modelResponse.data = answerValue;
-			if (explanationValue) modelResponse.explanation = explanationValue;
-			const modelText = JSON.stringify(modelResponse, null, 2);
+			let modelText;
+			if (format === 'text') {
+				modelText = isJSON(answerValue) ? JSON.stringify(answerValue, null, 2) : String(answerValue || '');
+				if (explanationValue) log.warn('seed(): EXPLANATION has no representation in text format; ignored.');
+			} else {
+				if (answerValue) modelResponse.data = answerValue;
+				if (explanationValue) modelResponse.explanation = explanationValue;
+				modelText = JSON.stringify(modelResponse, null, 2);
+			}
 
 			if (userText.trim().length && modelText.trim().length > 0) {
 				historyToAdd.push({ role: 'user', content: userText.trim() });
