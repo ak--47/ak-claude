@@ -30,8 +30,9 @@ export { default as CodeAgent } from './code-agent.js';
 export { default as RagAgent } from './rag-agent.js';
 export { default as AgentQuery } from './agent-query.js';
 export { default as BaseClaude } from './base.js';
+export { MODEL_PRICING, resolvePricing, computeCost } from './base.js';
 export { default as log } from './logger.js';
-export { extractJSON, attemptJSONRecovery } from './json-helpers.js';
+export { extractJSON, attemptJSONRecovery, validateSchema } from './json-helpers.js';
 
 // ── Default Export (namespace object) ──
 

@@ -43,7 +43,53 @@ const MODEL_PRICING = {
 	'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
 };
 
-export { MODEL_PRICING, DEFAULT_MAX_TOKENS };
+/**
+ * Resolves pricing for a model id.
+ * Handles Vertex dated snapshots (`claude-opus-4-5@20250514`) by falling back to
+ * the bare id. Returns null when the model's pricing is unknown.
+ * @param {string|null|undefined} modelId
+ * @returns {{ input: number, output: number }|null}
+ */
+function resolvePricing(modelId) {
+	if (!modelId) return null;
+	if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
+	if (modelId.includes('@')) {
+		// Vertex dated snapshots use an `@` separator, e.g. claude-opus-4-5@20250514.
+		// Try the hyphen-dated key first (claude-opus-4-5-20250514), then the bare id
+		// (claude-sonnet-5) for current-gen models that only have a bare price entry.
+		const hyphenated = modelId.replace('@', '-');
+		if (MODEL_PRICING[hyphenated]) return MODEL_PRICING[hyphenated];
+		const bare = modelId.split('@')[0];
+		if (MODEL_PRICING[bare]) return MODEL_PRICING[bare];
+	}
+	return null;
+}
+
+/**
+ * Computes estimated USD cost from token counts using MODEL_PRICING.
+ * @param {string|null|undefined} modelId
+ * @param {number} promptTokens
+ * @param {number} responseTokens
+ * @returns {number|null} Cost in USD, or null when pricing is unknown.
+ */
+function computeCost(modelId, promptTokens, responseTokens) {
+	const pricing = resolvePricing(modelId);
+	if (!pricing) return null;
+	return (promptTokens / 1_000_000) * pricing.input + (responseTokens / 1_000_000) * pricing.output;
+}
+
+/**
+ * Vertex endpoint types that route to the current Claude 5-family models.
+ * `global` (recommended, no premium), and the `us`/`eu` multi-region endpoints.
+ * Any other value is a specific regional endpoint (e.g. us-east5) that only
+ * serves Claude Sonnet 4.6 and earlier.
+ */
+const GLOBAL_OR_MULTIREGION = new Set(['global', 'us', 'eu']);
+
+/** Models that require a global/multi-region Vertex endpoint (not a specific region). */
+const CLAUDE5_FAMILY_REGEX = /^claude-(sonnet-5|opus-4-[78]|fable-5|mythos)/;
+
+export { MODEL_PRICING, DEFAULT_MAX_TOKENS, resolvePricing, computeCost };
 
 // ── BaseClaude Class ─────────────────────────────────────────────────────────
 
@@ -76,9 +122,14 @@ class BaseClaude {
 		}
 
 		// ── Vertex AI ──
+		// Region precedence: explicit vertexRegion option > GOOGLE_CLOUD_LOCATION env > 'global'.
+		// 'global' is the recommended default — it routes dynamically, serves the
+		// current Claude 5-family models, and carries no 10% regional premium.
+		// Specific regional endpoints (e.g. us-east5) only serve Claude Sonnet 4.6
+		// and earlier; set vertexRegion explicitly if you need data residency.
 		this.vertexai = options.vertexai ?? false;
 		this.vertexProjectId = options.vertexProjectId ?? process.env.GOOGLE_CLOUD_PROJECT ?? undefined;
-		this.vertexRegion = options.vertexRegion ?? process.env.GOOGLE_CLOUD_LOCATION ?? 'us-east5';
+		this.vertexRegion = options.vertexRegion ?? process.env.GOOGLE_CLOUD_LOCATION ?? 'global';
 
 		// ── Auth ──
 		if (!this.vertexai) {
@@ -204,6 +255,11 @@ class BaseClaude {
 			this.clients.raw = this.client;
 			this._clientReady = true;
 			log.debug(`${this.constructor.name}: Vertex AI client created (project=${this.vertexProjectId}, region=${this.vertexRegion})`);
+			// Warn on a known-bad pairing: Claude 5-family models need a global/
+			// multi-region endpoint; specific regional endpoints won't serve them.
+			if (CLAUDE5_FAMILY_REGEX.test(this.modelName) && !GLOBAL_OR_MULTIREGION.has(this.vertexRegion)) {
+				log.warn(`Model "${this.modelName}" may not be served by the regional Vertex endpoint "${this.vertexRegion}". Claude 5-family models require the "global" (recommended) or a multi-region ("us"/"eu") endpoint. Set vertexRegion: 'global' or GOOGLE_CLOUD_LOCATION=global.`);
+			}
 		}
 	}
 
@@ -544,17 +600,52 @@ class BaseClaude {
 		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
 		const useCumulative = cumulative.attempts > 0;
 
+		const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
+		const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
+		const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
+
 		return {
-			promptTokens: useCumulative ? cumulative.promptTokens : meta.promptTokens,
-			responseTokens: useCumulative ? cumulative.responseTokens : meta.responseTokens,
-			totalTokens: useCumulative ? cumulative.totalTokens : meta.totalTokens,
+			promptTokens,
+			responseTokens,
+			totalTokens,
 			cacheCreationTokens: meta.cacheCreationTokens,
 			cacheReadTokens: meta.cacheReadTokens,
 			attempts: useCumulative ? cumulative.attempts : 1,
 			modelVersion: meta.modelVersion,
 			requestedModel: meta.requestedModel,
 			stopReason: meta.stopReason,
-			timestamp: meta.timestamp
+			timestamp: meta.timestamp,
+			estimatedCost: computeCost(meta.modelVersion || meta.requestedModel, promptTokens, responseTokens)
+		};
+	}
+
+	/**
+	 * Builds a usage object directly from a single API response, WITHOUT reading
+	 * mutable instance state (`lastResponseMetadata`/`_cumulativeUsage`). Safe to
+	 * call under concurrent send() calls on a shared instance — unlike
+	 * getLastUsage(), which reflects whichever call most recently mutated the
+	 * instance and can cross-talk between concurrent sends.
+	 * @param {Object} response - A single messages.create() response
+	 * @param {number} [attempts=1] - Attempts this call consumed
+	 * @returns {UsageData}
+	 * @protected
+	 */
+	_usageFromResponse(response, attempts = 1) {
+		const promptTokens = response?.usage?.input_tokens || 0;
+		const responseTokens = response?.usage?.output_tokens || 0;
+		const modelVersion = response?.model || null;
+		return {
+			promptTokens,
+			responseTokens,
+			totalTokens: promptTokens + responseTokens,
+			cacheCreationTokens: response?.usage?.cache_creation_input_tokens || 0,
+			cacheReadTokens: response?.usage?.cache_read_input_tokens || 0,
+			attempts,
+			modelVersion,
+			requestedModel: this.modelName,
+			stopReason: response?.stop_reason || null,
+			timestamp: Date.now(),
+			estimatedCost: computeCost(modelVersion || this.modelName, promptTokens, responseTokens)
 		};
 	}
 

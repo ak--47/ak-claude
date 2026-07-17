@@ -3,8 +3,8 @@
  * Uses messages.create() directly without maintaining conversation history.
  */
 
-import BaseClaude from './base.js';
-import { extractJSON } from './json-helpers.js';
+import BaseClaude, { computeCost } from './base.js';
+import { extractJSON, validateSchema } from './json-helpers.js';
 import log from './logger.js';
 
 /**
@@ -65,6 +65,10 @@ class Message extends BaseClaude {
 
 		this._responseSchema = options.responseSchema || null;
 		this._isStructured = !!(this._responseSchema || options.responseFormat === 'json');
+
+		// Extra re-send attempts when a schema-fallback response fails validation
+		// (Vertex prompt-paste path only). 0 disables retry. Default 2.
+		this.validationRetries = options.validationRetries ?? 2;
 
 		log.debug(`Message created (structured=${this._isStructured}, nativeSchema=${!!this._responseSchema})`);
 	}
@@ -129,72 +133,123 @@ class Message extends BaseClaude {
 			}
 		}
 
+		// Vertex has no native structured-output enforcement here (the schema is
+		// pasted into the prompt), so a fallback response can be schema-invalid.
+		// Validate + retry only on that path; the native path is guaranteed valid.
+		const usesFallbackSchema = !!(this._responseSchema && this.vertexai);
+		const maxAttempts = usesFallbackSchema ? 1 + Math.max(0, this.validationRetries) : 1;
+
 		/** @type {any} */
-		const params = {
+		const baseParams = {
 			model: this.modelName,
 			max_tokens: opts.maxTokens || this.maxTokens,
-			messages: [{ role: /** @type {'user'} */ ('user'), content: payloadStr }],
 			...(systemParam && { system: systemParam }),
 		};
 
-		// Native structured output via JSON Schema (not supported on Vertex AI)
+		// Native structured output via JSON Schema (direct API only, not Vertex here).
 		if (this._responseSchema && !this.vertexai) {
-			params.output_config = {
+			baseParams.output_config = {
 				format: {
 					type: 'json_schema',
 					schema: this._responseSchema
 				}
 			};
-		} else if (this._responseSchema && this.vertexai) {
-			// Fallback: inject schema into system prompt for Vertex AI
+		} else if (usesFallbackSchema) {
+			// Fallback: inject schema into system prompt for Vertex AI.
 			const schemaInstruction = `\n\nRespond ONLY with valid JSON matching this schema:\n${JSON.stringify(this._responseSchema, null, 2)}\nNo markdown code blocks, no preamble text.`;
-			if (typeof params.system === 'string') {
-				params.system += schemaInstruction;
-			} else if (Array.isArray(params.system)) {
-				params.system = [...params.system, { type: 'text', text: schemaInstruction }];
+			if (typeof baseParams.system === 'string') {
+				baseParams.system += schemaInstruction;
+			} else if (Array.isArray(baseParams.system)) {
+				baseParams.system = [...baseParams.system, { type: 'text', text: schemaInstruction }];
 			} else {
-				params.system = schemaInstruction.trim();
+				baseParams.system = schemaInstruction.trim();
 			}
 		}
 
 		if (this.thinking) {
-			params.thinking = this.thinking;
+			baseParams.thinking = this.thinking;
 		} else {
-			if (this.temperature !== undefined) params.temperature = this.temperature;
-			if (this.topP !== undefined) params.top_p = this.topP;
+			if (this.temperature !== undefined) baseParams.temperature = this.temperature;
+			if (this.topP !== undefined) baseParams.top_p = this.topP;
 		}
 
-		const response = await this.client.messages.create(params);
-		this._captureMetadata(response);
+		let userContent = payloadStr;
+		let text = '';
+		let data;
+		/** @type {string[]|null} */
+		let validationErrors = null;
+		/** @type {any} */
+		let lastResponse = null;
+		let cumPrompt = 0, cumResponse = 0, attempts = 0;
 
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			const params = { ...baseParams, messages: [{ role: /** @type {'user'} */ ('user'), content: userContent }] };
+			const response = await this.client.messages.create(params);
+			lastResponse = response;
+			attempts = attempt;
 
-		const text = this._extractText(response);
-		const result = {
-			text,
-			usage: this.getLastUsage()
-		};
+			// Accumulate usage across retries; each read is from THIS response only
+			// (concurrency-safe — never through mutable instance state after an await).
+			const perCall = this._usageFromResponse(response, attempt);
+			cumPrompt += perCall.promptTokens;
+			cumResponse += perCall.responseTokens;
 
-		// Parse structured data if configured
-		if (this._isStructured) {
+			this._captureMetadata(response);
+			text = this._extractText(response);
+
+			if (!this._isStructured) { data = undefined; break; }
+
+			// Parse
 			try {
-				if (this._responseSchema && !this.vertexai) {
-					// Native structured output — guaranteed valid JSON
-					result.data = JSON.parse(text);
-				} else {
-					// Fallback — extract JSON from potentially messy text
-					result.data = extractJSON(text);
-				}
+				data = (this._responseSchema && !this.vertexai)
+					? JSON.parse(text)          // native — guaranteed valid JSON
+					: extractJSON(text);        // fallback — extract from messy text
 			} catch (e) {
 				log.warn(`Could not parse structured response: ${e.message}`);
-				result.data = null;
+				data = null;
+			}
+
+			// Validation + retry only on the fallback (Vertex prompt-paste) path.
+			if (!usesFallbackSchema) { validationErrors = null; break; }
+
+			validationErrors = (data === null)
+				? ['$: could not parse any JSON from the model response']
+				: (validateSchema(data, this._responseSchema).length ? validateSchema(data, this._responseSchema) : null);
+
+			if (!validationErrors) break; // valid — done
+
+			if (attempt < maxAttempts) {
+				log.warn(`Structured output failed schema validation (attempt ${attempt}/${maxAttempts}): ${validationErrors.join('; ')}. Retrying with error feedback.`);
+				userContent = `${payloadStr}\n\nYour previous response did not satisfy the required JSON schema:\n${validationErrors.map(e => `- ${e}`).join('\n')}\n\nRespond ONLY with corrected JSON that matches the schema. No markdown, no preamble.`;
+			} else {
+				// Never return a schema-invalid object as success.
+				log.warn(`Structured output still invalid after ${attempt} attempt(s). Returning data: null with validationErrors.`);
+				data = null;
 			}
 		}
+
+		// Update instance state for getLastUsage() back-compat (last-write-wins;
+		// unsafe under concurrency — callers should prefer result.usage).
+		this._cumulativeUsage = {
+			promptTokens: cumPrompt,
+			responseTokens: cumResponse,
+			totalTokens: cumPrompt + cumResponse,
+			attempts
+		};
+
+		const perCall = this._usageFromResponse(lastResponse, attempts);
+		const usage = {
+			...perCall,
+			promptTokens: cumPrompt,
+			responseTokens: cumResponse,
+			totalTokens: cumPrompt + cumResponse,
+			estimatedCost: computeCost(perCall.modelVersion || this.modelName, cumPrompt, cumResponse)
+		};
+
+		/** @type {any} */
+		const result = { text, usage };
+		if (this._isStructured) result.data = data;
+		if (validationErrors) result.validationErrors = validationErrors;
 
 		return result;
 	}

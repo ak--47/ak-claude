@@ -74,7 +74,8 @@ Shared foundation. Not typically instantiated directly.
 - `init(force?)` — Validates connectivity; runs a tiny `messages.create()` health check only if `healthCheck: true`
 - `seed(examples, opts?)` — Add example pairs to chat history for few-shot learning
 - `getHistory(curated?)` / `clearHistory()` — Manage chat history. `curated: true` returns text-only simplified history
-- `getLastUsage()` — Structured usage data after API calls (includes `cacheCreationTokens`, `cacheReadTokens`)
+- `getLastUsage()` — Structured usage data after API calls (includes `cacheCreationTokens`, `cacheReadTokens`, and `estimatedCost` from MODEL_PRICING — `null` if unpriced). Reflects the instance's LAST call; unsafe under concurrent `send()`s — prefer the per-call `result.usage` (computed synchronously from that response via `_usageFromResponse()`)
+- `resolvePricing(modelId)` / `computeCost(modelId, in, out)` — pricing helpers; handle Vertex dated snapshots (`model@YYYYMMDD`), return `null` for unknown models (exported from index)
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation via `messages.countTokens()`
 - `listModels()` — List all available models from the Anthropic API (direct API only, not Vertex AI)
 - `getModel(modelId)` — Get detailed information about a specific model (direct API only, not Vertex AI)
@@ -102,8 +103,9 @@ Multi-turn text conversation. Extends BaseClaude.
 
 ### Message (`message.js`)
 Stateless one-off messages. Uses `messages.create()` directly. Extends BaseClaude.
-- `send(payload, opts?)` -> `{ text, data?, usage }`
-- Supports native structured output via `responseSchema` (uses `output_config.format.json_schema`)
+- `send(payload, opts?)` -> `{ text, data?, usage, validationErrors? }`
+- Supports native structured output via `responseSchema` (uses `output_config.format.json_schema`) on the direct API
+- On **Vertex AI**, `responseSchema` falls back to system-prompt injection (native `output_config` is org-policy-gated), then **validates the parsed object against the schema** and retries with error feedback (`validationRetries`, default 2). Invalid output returns `data: null` + `result.validationErrors` — never a schema-invalid object as success
 - Supports fallback JSON mode via `responseFormat: 'json'` (system prompt hacking)
 - `getHistory()`, `clearHistory()`, `seed()` are no-ops
 
@@ -167,7 +169,7 @@ npm run typecheck          # Verify TypeScript definitions
 - `ANTHROPIC_API_KEY` — Anthropic API key (primary, for direct API auth)
 - `CLAUDE_API_KEY` — Anthropic API key (fallback)
 - `GOOGLE_CLOUD_PROJECT` — GCP project ID (for Vertex AI auth)
-- `GOOGLE_CLOUD_LOCATION` — GCP region (for Vertex AI auth, default: `us-east5`)
+- `GOOGLE_CLOUD_LOCATION` — GCP region (for Vertex AI auth, default: `global`). Precedence: `vertexRegion` option > this env var > `global`. Use `global`/`us`/`eu` for Claude 5-family models; specific regions (e.g. `us-east5`) only serve Sonnet 4.6 and earlier
 - `NODE_ENV` — Environment (dev/test/prod affects log levels)
 - `LOG_LEVEL` — Override log level (debug/info/warn/error)
 
