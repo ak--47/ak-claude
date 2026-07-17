@@ -194,7 +194,8 @@ new Transformer(); // auto-detects from env
 ```javascript
 // Named exports
 import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, AgentQuery, BaseClaude, log } from 'ak-claude';
-import { extractJSON, attemptJSONRecovery } from 'ak-claude';
+import { extractJSON, attemptJSONRecovery, validateSchema } from 'ak-claude';
+import { MODEL_PRICING, resolvePricing, computeCost } from 'ak-claude';
 
 // Default export (namespace object)
 import AI from 'ak-claude';
@@ -370,12 +371,12 @@ if (await modelExists(chat, 'claude-opus-4-6')) {
 
 ## Testing Strategy
 
-- "No mocks" approach — all tests use real Anthropic API calls
+- **Two test tiers:** (1) live-API suites (`*.test.js`) use real Anthropic API calls — no mocks; (2) `consumer-fixes.test.js` is offline/mocked (stubs the client on the instance) and safe to run anytime for the 0.1.0 fix logic
 - **Do NOT run tests during development** — they are slow (real API calls) and expensive. Use `npm run typecheck` and `npm run build:cjs` to verify changes.
 - Test timeout: 30 seconds (AI calls take 5-15 seconds)
 - Rate limiting (429 errors) can cause flaky failures — retry after waiting
 - Test model: use `claude-haiku-4-5-20251001` for tests (cheapest, fastest)
-- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `json-helpers.test.js`
+- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `json-helpers.test.js`, `consumer-fixes.test.js` (offline/mocked)
 
 ## Key Design Patterns
 

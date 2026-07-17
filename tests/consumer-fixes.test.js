@@ -130,6 +130,26 @@ describe('consumer-fixes (ak-claude)', () => {
 			expect(resolvePricing('nope')).toBeNull();
 		});
 
+		it('resolves bare opus-4-5 / sonnet-4-5 ids (B2)', () => {
+			expect(resolvePricing('claude-opus-4-5')).toEqual({ input: 15.00, output: 75.00 });
+			expect(resolvePricing('claude-sonnet-4-5')).toEqual({ input: 3.00, output: 15.00 });
+		});
+
+		it('includes cache-token billing in estimatedCost (S2)', async () => {
+			const msg = new Message({ ...KEY, modelName: 'claude-sonnet-4-6' });
+			msg._initialized = true;
+			msg.client = { messages: { create: jest.fn(async () => ({
+				content: [{ type: 'text', text: 'r' }],
+				model: 'claude-sonnet-4-6',
+				stop_reason: 'end_turn',
+				usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 }
+			})) } };
+			const r = await msg.send('hi');
+			expect(r.usage.cacheCreationTokens).toBe(1_000_000);
+			// input 3.00: cache-write 1.25x = 3.75, cache-read 0.1x = 0.30
+			expect(r.usage.estimatedCost).toBeCloseTo(3.75 + 0.30, 5);
+		});
+
 		it('resolves direct-API hyphen-dated builds to bare pricing', () => {
 			// API echoes a dated snapshot even when the bare id is the priced one
 			expect(resolvePricing('claude-sonnet-4-6-20250514')).toEqual(resolvePricing('claude-sonnet-4-6'));
@@ -166,6 +186,60 @@ describe('consumer-fixes (ak-claude)', () => {
 			expect(validateSchema({ source: 'web', count: 1, extra: 1 }, schema).some(e => e.includes('extra'))).toBe(true);
 			expect(validateSchema({ source: 'web', count: 'x' }, schema).some(e => e.includes('integer'))).toBe(true);
 			expect(validateSchema({ source: 'web', count: 1, tags: ['a', 5] }, schema).some(e => e.includes('tags[1]'))).toBe(true);
+		});
+
+		it('handles nullable, deep-equal enum, and prototype keys (S1)', () => {
+			expect(validateSchema({ note: null }, { type: 'object', properties: { note: { type: 'string', nullable: true } } })).toEqual([]);
+			expect(validateSchema({ a: 1 }, { enum: [{ a: 1 }] })).toEqual([]);
+			// prototype key must not satisfy required, and must be flagged as extra
+			expect(validateSchema({}, { type: 'object', required: ['toString'] }).some(e => e.includes('toString'))).toBe(true);
+			expect(validateSchema({ x: 1 }, { type: 'object', additionalProperties: false, properties: { x: {} } })).toEqual([]);
+		});
+	});
+
+	// ── validationMode: 'warn' (B4 escape hatch) ──
+	describe('validationMode warn returns parsed data + errors', () => {
+		it('keeps invalid data but surfaces validationErrors', async () => {
+			const msg = new Message({ ...KEY, responseSchema: SCHEMA, validationRetries: 0, validationMode: 'warn' });
+			msg.vertexai = true;
+			msg._initialized = true;
+			msg.client = { messages: { create: jest.fn(async () => textResponse(JSON.stringify({ source: 'ftp' }), 5, 5)) } };
+			const r = await msg.send('hi');
+			expect(r.data).toEqual({ source: 'ftp' });   // returned despite being invalid
+			expect(r.validationErrors.length).toBeGreaterThan(0);
+		});
+	});
+
+	// ── S4: Vertex temperature + top_p guard ──
+	describe('S4 Message on Vertex does not send temperature + top_p together', () => {
+		it('sends temperature only', async () => {
+			const msg = new Message({ ...KEY, topP: 0.9 });
+			msg.vertexai = true;      // force Vertex guard
+			msg._initialized = true;
+			const create = jest.fn(async () => textResponse('r', 1, 1));
+			msg.client = { messages: { create } };
+			await msg.send('hi');
+			const params = create.mock.calls[0][0];
+			expect(params.temperature).toBeDefined();
+			expect(params.top_p).toBeUndefined();
+		});
+	});
+
+	// ── B1: estimateCost() uses resolvePricing ──
+	describe('B1 estimateCost resolves pricing and nulls unknown', () => {
+		it('non-null for a priced model, null for unknown', async () => {
+			const priced = new Message({ ...KEY, modelName: 'claude-sonnet-4-6' });
+			priced._initialized = true;
+			priced.client = { messages: { countTokens: jest.fn(async () => ({ input_tokens: 1_000_000 })) } };
+			const c1 = await priced.estimateCost('hi');
+			expect(c1.estimatedInputCost).toBeCloseTo(3.00, 5);
+
+			const unknown = new Message({ ...KEY, modelName: 'claude-made-up' });
+			unknown._initialized = true;
+			unknown.client = { messages: { countTokens: jest.fn(async () => ({ input_tokens: 1000 })) } };
+			const c2 = await unknown.estimateCost('hi');
+			expect(c2.estimatedInputCost).toBeNull();
+			expect(c2.pricing).toBeNull();
 		});
 	});
 });

@@ -34,9 +34,11 @@ const MODEL_PRICING = {
 	'claude-opus-4-8': { input: 5.00, output: 25.00 },
 	'claude-opus-4-7': { input: 5.00, output: 25.00 },
 	'claude-opus-4-6': { input: 5.00, output: 25.00 },
+	'claude-opus-4-5': { input: 15.00, output: 75.00 },
 	'claude-opus-4-5-20250514': { input: 15.00, output: 75.00 },
 	// Sonnet 4.x
 	'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
+	'claude-sonnet-4-5': { input: 3.00, output: 15.00 },
 	'claude-sonnet-4-5-20250514': { input: 3.00, output: 15.00 },
 	// Haiku
 	'claude-haiku-4-5': { input: 1.00, output: 5.00 },
@@ -68,17 +70,28 @@ function resolvePricing(modelId) {
 	return null;
 }
 
+/** Anthropic cache-token multipliers relative to the base input rate. */
+const CACHE_WRITE_MULTIPLIER = 1.25; // cache_creation_input_tokens
+const CACHE_READ_MULTIPLIER = 0.1;   // cache_read_input_tokens
+
 /**
  * Computes estimated USD cost from token counts using MODEL_PRICING.
+ * `input_tokens` from the API EXCLUDES cache tokens, so cache-write (1.25x input)
+ * and cache-read (0.1x input) are added on top.
  * @param {string|null|undefined} modelId
  * @param {number} promptTokens
  * @param {number} responseTokens
+ * @param {number} [cacheCreationTokens=0]
+ * @param {number} [cacheReadTokens=0]
  * @returns {number|null} Cost in USD, or null when pricing is unknown.
  */
-function computeCost(modelId, promptTokens, responseTokens) {
+function computeCost(modelId, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
 	const pricing = resolvePricing(modelId);
 	if (!pricing) return null;
-	return (promptTokens / 1_000_000) * pricing.input + (responseTokens / 1_000_000) * pricing.output;
+	return (promptTokens / 1_000_000) * pricing.input
+		+ (responseTokens / 1_000_000) * pricing.output
+		+ (cacheCreationTokens / 1_000_000) * pricing.input * CACHE_WRITE_MULTIPLIER
+		+ (cacheReadTokens / 1_000_000) * pricing.input * CACHE_READ_MULTIPLIER;
 }
 
 /**
@@ -280,21 +293,31 @@ class BaseClaude {
 		await this._ensureClient();
 		log.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
 
-		if (this.healthCheck) {
-			try {
-				await this.client.messages.create({
-					model: this.modelName,
-					max_tokens: 1,
-					messages: [{ role: 'user', content: 'hi' }]
-				});
-				log.debug(`${this.constructor.name}: API connection successful.`);
-			} catch (e) {
-				throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-			}
-		}
+		await this._healthCheckPing();
 
 		this._initialized = true;
 		log.debug(`${this.constructor.name}: Initialized.`);
+	}
+
+	/**
+	 * Opt-in connectivity check — runs a tiny messages.create() only when
+	 * `healthCheck: true`. Requires the client to be ready (call after
+	 * `_ensureClient()`).
+	 * @returns {Promise<void>}
+	 * @protected
+	 */
+	async _healthCheckPing() {
+		if (!this.healthCheck) return;
+		try {
+			await this.client.messages.create({
+				model: this.modelName,
+				max_tokens: 1,
+				messages: [{ role: 'user', content: 'hi' }]
+			});
+			log.debug(`${this.constructor.name}: API connection successful.`);
+		} catch (e) {
+			throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+		}
 	}
 
 	// ── Core Message Sending ─────────────────────────────────────────────────
@@ -606,21 +629,40 @@ class BaseClaude {
 		const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
 		const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
 		const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
+		// Cache tokens accumulate across retries when tracked (Message); otherwise
+		// fall back to the last response's values (single-call classes).
+		const cacheCreationTokens = useCumulative && cumulative.cacheCreationTokens !== undefined ? cumulative.cacheCreationTokens : meta.cacheCreationTokens;
+		const cacheReadTokens = useCumulative && cumulative.cacheReadTokens !== undefined ? cumulative.cacheReadTokens : meta.cacheReadTokens;
 
 		return {
 			promptTokens,
 			responseTokens,
 			totalTokens,
-			cacheCreationTokens: meta.cacheCreationTokens,
-			cacheReadTokens: meta.cacheReadTokens,
+			cacheCreationTokens,
+			cacheReadTokens,
 			attempts: useCumulative ? cumulative.attempts : 1,
 			modelVersion: meta.modelVersion,
 			requestedModel: meta.requestedModel,
 			stopReason: meta.stopReason,
 			timestamp: meta.timestamp,
-			estimatedCost: computeCost(meta.modelVersion, promptTokens, responseTokens)
-				?? computeCost(meta.requestedModel, promptTokens, responseTokens)
+			estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
 		};
+	}
+
+	/**
+	 * Estimated USD cost, preferring the model id the API echoed (`modelVersion`)
+	 * and falling back to the requested model when that build isn't priced.
+	 * @param {string|null|undefined} modelVersion
+	 * @param {number} promptTokens
+	 * @param {number} responseTokens
+	 * @param {number} [cacheCreationTokens=0]
+	 * @param {number} [cacheReadTokens=0]
+	 * @returns {number|null}
+	 * @protected
+	 */
+	_estimatedCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
+		return computeCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
+			?? computeCost(this.modelName, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens);
 	}
 
 	/**
@@ -637,20 +679,21 @@ class BaseClaude {
 	_usageFromResponse(response, attempts = 1) {
 		const promptTokens = response?.usage?.input_tokens || 0;
 		const responseTokens = response?.usage?.output_tokens || 0;
+		const cacheCreationTokens = response?.usage?.cache_creation_input_tokens || 0;
+		const cacheReadTokens = response?.usage?.cache_read_input_tokens || 0;
 		const modelVersion = response?.model || null;
 		return {
 			promptTokens,
 			responseTokens,
 			totalTokens: promptTokens + responseTokens,
-			cacheCreationTokens: response?.usage?.cache_creation_input_tokens || 0,
-			cacheReadTokens: response?.usage?.cache_read_input_tokens || 0,
+			cacheCreationTokens,
+			cacheReadTokens,
 			attempts,
 			modelVersion,
 			requestedModel: this.modelName,
 			stopReason: response?.stop_reason || null,
 			timestamp: Date.now(),
-			estimatedCost: computeCost(modelVersion, promptTokens, responseTokens)
-				?? computeCost(this.modelName, promptTokens, responseTokens)
+			estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
 		};
 	}
 
@@ -698,14 +741,16 @@ class BaseClaude {
 	 */
 	async estimateCost(nextPayload) {
 		const tokenInfo = await this.estimate(nextPayload);
-		const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
+		const pricing = resolvePricing(this.modelName);
 
 		return {
 			inputTokens: tokenInfo.inputTokens,
 			model: this.modelName,
 			pricing,
-			estimatedInputCost: (tokenInfo.inputTokens / 1_000_000) * pricing.input,
-			note: 'Cost is for input tokens only; output cost depends on response length'
+			estimatedInputCost: pricing ? (tokenInfo.inputTokens / 1_000_000) * pricing.input : null,
+			note: pricing
+				? 'Cost is for input tokens only; output cost depends on response length'
+				: `No pricing known for model "${this.modelName}"; estimatedInputCost is null`
 		};
 	}
 

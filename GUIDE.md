@@ -174,7 +174,13 @@ console.log(result.data);
 
 When `responseSchema` is provided over the **direct Anthropic API**, the API guarantees valid JSON matching your schema via `output_config`. The parsed object is available as `result.data`; the raw string is `result.text`.
 
-> **On Vertex AI**, ak-claude falls back to pasting the schema into the system prompt (native `output_config` on Vertex is gated by a Google Cloud org policy). Because the model isn't *forced* to comply, `send()` now **validates** the parsed object against your schema and, on failure, retries with the validation errors fed back to the model (`validationRetries`, default 2). If it still can't produce a valid object, `result.data` is `null` and `result.validationErrors` lists why — a schema-invalid object is **never** returned as success. Set `validationRetries: 0` to disable retries.
+> **On Vertex AI**, ak-claude falls back to pasting the schema into the system prompt (native `output_config` on Vertex is GA but gated by the org policy `constraints/vertexai.allowedPartnerModelFeatures`, default-deny per model). Because the model isn't *forced* to comply, `send()` **validates** the parsed object against your schema and, on failure, retries with the validation errors fed back to the model (`validationRetries`, default 2). If it still can't produce a valid object, `result.data` is `null` and `result.validationErrors` lists why — a schema-invalid object is **never** returned as success. Options:
+>
+> - `validationRetries: 0` — disable retries (still validates; still nulls invalid data).
+> - `validationMode: 'warn'` — return the parsed (invalid) data anyway, plus `result.validationErrors`, instead of nulling it.
+> - `vertexNativeStructuredOutput: true` — use native `output_config` on Vertex (only if your org has enabled the `structured_outputs` feature; otherwise Vertex returns a 400).
+>
+> **Validator keyword support** (`validateSchema`): `type` (incl. arrays and `integer`), `required`, `properties`, `additionalProperties: false`, `items` (single schema), `enum` (deep-equal), `nullable: true`. `anyOf`/`oneOf`/`allOf`/`$ref` are pass-through (not enforced).
 
 ### Fallback JSON Mode
 
@@ -950,7 +956,9 @@ const usage = instance.getLastUsage();
 // }
 ```
 
-> **Concurrency:** `getLastUsage()` reflects the **instance's last completed call** and mutates on every `send()`. If you share one instance across concurrent `send()` calls, `getLastUsage()` can report another call's tokens. Use the per-call **`result.usage`** returned by `send()` instead — it is computed synchronously from that call's own response and is safe under concurrency. `result.usage` includes `estimatedCost` too.
+> **`estimatedCost` includes cache-token billing:** cache-write tokens are priced at 1.25× the input rate and cache-read at 0.1× (Anthropic's rates), on top of `input_tokens`/`output_tokens`. Returns `null` when the model is unpriced.
+
+> **Concurrency:** `getLastUsage()` reflects the **instance's last completed call** and mutates on every `send()` — it is **not** safe to read across concurrent sends on a shared instance. The **stateless** `Message` class returns a per-call **`result.usage`** computed synchronously from that call's own response(s), which *is* concurrency-safe — use it when sharing one instance across concurrent calls. The stateful classes (`Chat`, `Transformer`, `RagAgent`, `ToolAgent`, `CodeAgent`) maintain history/rounds and are not designed to be shared across concurrent calls; their `result.usage` is derived from instance state.
 
 ### Cost Estimation
 

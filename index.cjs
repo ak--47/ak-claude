@@ -258,12 +258,15 @@ function findCompleteJSONStructures(text) {
 function validateSchema(data, schema, path2 = "$") {
   const errors = [];
   if (!schema || typeof schema !== "object") return errors;
+  if (data === null && schema.nullable === true) return errors;
   if (Array.isArray(schema.enum)) {
-    const ok = schema.enum.some((v) => v === data);
+    const target = JSON.stringify(data);
+    const ok = schema.enum.some((v) => v === data || JSON.stringify(v) === target);
     if (!ok) errors.push(`${path2}: value ${JSON.stringify(data)} is not one of allowed enum values ${JSON.stringify(schema.enum)}`);
   }
   if (schema.type !== void 0) {
     const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (schema.nullable === true) types.push("null");
     if (!types.some((t) => matchesType(data, t))) {
       errors.push(`${path2}: expected type ${types.join("|")} but got ${describeType(data)}`);
       return errors;
@@ -274,16 +277,16 @@ function validateSchema(data, schema, path2 = "$") {
     const props = schema.properties || {};
     if (Array.isArray(schema.required)) {
       for (const key of schema.required) {
-        if (!(key in data)) errors.push(`${path2}: missing required property "${key}"`);
+        if (!Object.hasOwn(data, key)) errors.push(`${path2}: missing required property "${key}"`);
       }
     }
     if (schema.additionalProperties === false) {
       for (const key of Object.keys(data)) {
-        if (!(key in props)) errors.push(`${path2}: unexpected property "${key}" (additionalProperties is false)`);
+        if (!Object.hasOwn(props, key)) errors.push(`${path2}: unexpected property "${key}" (additionalProperties is false)`);
       }
     }
     for (const [key, subSchema] of Object.entries(props)) {
-      if (key in data) {
+      if (Object.hasOwn(data, key)) {
         errors.push(...validateSchema(
           data[key],
           /** @type {any} */
@@ -394,9 +397,11 @@ var MODEL_PRICING = {
   "claude-opus-4-8": { input: 5, output: 25 },
   "claude-opus-4-7": { input: 5, output: 25 },
   "claude-opus-4-6": { input: 5, output: 25 },
+  "claude-opus-4-5": { input: 15, output: 75 },
   "claude-opus-4-5-20250514": { input: 15, output: 75 },
   // Sonnet 4.x
   "claude-sonnet-4-6": { input: 3, output: 15 },
+  "claude-sonnet-4-5": { input: 3, output: 15 },
   "claude-sonnet-4-5-20250514": { input: 3, output: 15 },
   // Haiku
   "claude-haiku-4-5": { input: 1, output: 5 },
@@ -413,10 +418,12 @@ function resolvePricing(modelId) {
   if (bare !== modelId && MODEL_PRICING[bare]) return MODEL_PRICING[bare];
   return null;
 }
-function computeCost(modelId, promptTokens, responseTokens) {
+var CACHE_WRITE_MULTIPLIER = 1.25;
+var CACHE_READ_MULTIPLIER = 0.1;
+function computeCost(modelId, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
   const pricing = resolvePricing(modelId);
   if (!pricing) return null;
-  return promptTokens / 1e6 * pricing.input + responseTokens / 1e6 * pricing.output;
+  return promptTokens / 1e6 * pricing.input + responseTokens / 1e6 * pricing.output + cacheCreationTokens / 1e6 * pricing.input * CACHE_WRITE_MULTIPLIER + cacheReadTokens / 1e6 * pricing.input * CACHE_READ_MULTIPLIER;
 }
 var GLOBAL_OR_MULTIREGION = /* @__PURE__ */ new Set(["global", "us", "eu"]);
 var CLAUDE5_FAMILY_REGEX = /^claude-(sonnet-5|opus-4-[78]|fable-5|mythos)/;
@@ -540,20 +547,29 @@ var BaseClaude = class {
     if (this._initialized && !force) return;
     await this._ensureClient();
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
-    if (this.healthCheck) {
-      try {
-        await this.client.messages.create({
-          model: this.modelName,
-          max_tokens: 1,
-          messages: [{ role: "user", content: "hi" }]
-        });
-        logger_default.debug(`${this.constructor.name}: API connection successful.`);
-      } catch (e) {
-        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-      }
-    }
+    await this._healthCheckPing();
     this._initialized = true;
     logger_default.debug(`${this.constructor.name}: Initialized.`);
+  }
+  /**
+   * Opt-in connectivity check — runs a tiny messages.create() only when
+   * `healthCheck: true`. Requires the client to be ready (call after
+   * `_ensureClient()`).
+   * @returns {Promise<void>}
+   * @protected
+   */
+  async _healthCheckPing() {
+    if (!this.healthCheck) return;
+    try {
+      await this.client.messages.create({
+        model: this.modelName,
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }]
+      });
+      logger_default.debug(`${this.constructor.name}: API connection successful.`);
+    } catch (e) {
+      throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+    }
   }
   // ── Core Message Sending ─────────────────────────────────────────────────
   /**
@@ -803,19 +819,35 @@ ${contextText}
     const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
     const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
     const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
+    const cacheCreationTokens = useCumulative && cumulative.cacheCreationTokens !== void 0 ? cumulative.cacheCreationTokens : meta.cacheCreationTokens;
+    const cacheReadTokens = useCumulative && cumulative.cacheReadTokens !== void 0 ? cumulative.cacheReadTokens : meta.cacheReadTokens;
     return {
       promptTokens,
       responseTokens,
       totalTokens,
-      cacheCreationTokens: meta.cacheCreationTokens,
-      cacheReadTokens: meta.cacheReadTokens,
+      cacheCreationTokens,
+      cacheReadTokens,
       attempts: useCumulative ? cumulative.attempts : 1,
       modelVersion: meta.modelVersion,
       requestedModel: meta.requestedModel,
       stopReason: meta.stopReason,
       timestamp: meta.timestamp,
-      estimatedCost: computeCost(meta.modelVersion, promptTokens, responseTokens) ?? computeCost(meta.requestedModel, promptTokens, responseTokens)
+      estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
     };
+  }
+  /**
+   * Estimated USD cost, preferring the model id the API echoed (`modelVersion`)
+   * and falling back to the requested model when that build isn't priced.
+   * @param {string|null|undefined} modelVersion
+   * @param {number} promptTokens
+   * @param {number} responseTokens
+   * @param {number} [cacheCreationTokens=0]
+   * @param {number} [cacheReadTokens=0]
+   * @returns {number|null}
+   * @protected
+   */
+  _estimatedCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
+    return computeCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens) ?? computeCost(this.modelName, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens);
   }
   /**
    * Builds a usage object directly from a single API response, WITHOUT reading
@@ -831,19 +863,21 @@ ${contextText}
   _usageFromResponse(response, attempts = 1) {
     const promptTokens = response?.usage?.input_tokens || 0;
     const responseTokens = response?.usage?.output_tokens || 0;
+    const cacheCreationTokens = response?.usage?.cache_creation_input_tokens || 0;
+    const cacheReadTokens = response?.usage?.cache_read_input_tokens || 0;
     const modelVersion = response?.model || null;
     return {
       promptTokens,
       responseTokens,
       totalTokens: promptTokens + responseTokens,
-      cacheCreationTokens: response?.usage?.cache_creation_input_tokens || 0,
-      cacheReadTokens: response?.usage?.cache_read_input_tokens || 0,
+      cacheCreationTokens,
+      cacheReadTokens,
       attempts,
       modelVersion,
       requestedModel: this.modelName,
       stopReason: response?.stop_reason || null,
       timestamp: Date.now(),
-      estimatedCost: computeCost(modelVersion, promptTokens, responseTokens) ?? computeCost(this.modelName, promptTokens, responseTokens)
+      estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
     };
   }
   // ── Token Estimation ────────────────────────────────────────────────────
@@ -883,13 +917,13 @@ ${contextText}
    */
   async estimateCost(nextPayload) {
     const tokenInfo = await this.estimate(nextPayload);
-    const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
+    const pricing = resolvePricing(this.modelName);
     return {
       inputTokens: tokenInfo.inputTokens,
       model: this.modelName,
       pricing,
-      estimatedInputCost: tokenInfo.inputTokens / 1e6 * pricing.input,
-      note: "Cost is for input tokens only; output cost depends on response length"
+      estimatedInputCost: pricing ? tokenInfo.inputTokens / 1e6 * pricing.input : null,
+      note: pricing ? "Cost is for input tokens only; output cost depends on response length" : `No pricing known for model "${this.modelName}"; estimatedInputCost is null`
     };
   }
   // ── Model Management ─────────────────────────────────────────────────────
@@ -1364,6 +1398,13 @@ var Message = class extends base_default {
     this._responseSchema = options.responseSchema || null;
     this._isStructured = !!(this._responseSchema || options.responseFormat === "json");
     this.validationRetries = options.validationRetries ?? 2;
+    this.validationMode = options.validationMode === "warn" ? "warn" : "strict";
+    this.vertexNativeStructuredOutput = options.vertexNativeStructuredOutput ?? false;
+    this._schemaInstruction = this._responseSchema ? `
+
+Respond ONLY with valid JSON matching this schema:
+${JSON.stringify(this._responseSchema)}
+No markdown code blocks, no preamble text.` : "";
     logger_default.debug(`Message created (structured=${this._isStructured}, nativeSchema=${!!this._responseSchema})`);
   }
   /**
@@ -1376,18 +1417,7 @@ var Message = class extends base_default {
     if (this._initialized && !force) return;
     await this._ensureClient();
     logger_default.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
-    if (this.healthCheck) {
-      try {
-        await this.client.messages.create({
-          model: this.modelName,
-          max_tokens: 1,
-          messages: [{ role: "user", content: "hi" }]
-        });
-        logger_default.debug(`${this.constructor.name}: API connection successful.`);
-      } catch (e) {
-        throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-      }
-    }
+    await this._healthCheckPing();
     this._initialized = true;
     logger_default.debug(`${this.constructor.name}: Initialized (stateless mode).`);
   }
@@ -1415,7 +1445,8 @@ var Message = class extends base_default {
         systemParam = "Always respond ONLY with valid JSON. No markdown code blocks, no preamble text.";
       }
     }
-    const usesFallbackSchema = !!(this._responseSchema && this.vertexai);
+    const useNativeSchema = !!(this._responseSchema && (!this.vertexai || this.vertexNativeStructuredOutput));
+    const usesFallbackSchema = !!(this._responseSchema && this.vertexai && !this.vertexNativeStructuredOutput);
     const retries = Math.max(0, Number(this.validationRetries) || 0);
     const maxAttempts = usesFallbackSchema ? 1 + retries : 1;
     const baseParams = {
@@ -1423,7 +1454,7 @@ var Message = class extends base_default {
       max_tokens: opts.maxTokens || this.maxTokens,
       ...systemParam && { system: systemParam }
     };
-    if (this._responseSchema && !this.vertexai) {
+    if (useNativeSchema) {
       baseParams.output_config = {
         format: {
           type: "json_schema",
@@ -1431,11 +1462,7 @@ var Message = class extends base_default {
         }
       };
     } else if (usesFallbackSchema) {
-      const schemaInstruction = `
-
-Respond ONLY with valid JSON matching this schema:
-${JSON.stringify(this._responseSchema, null, 2)}
-No markdown code blocks, no preamble text.`;
+      const schemaInstruction = this._schemaInstruction;
       if (typeof baseParams.system === "string") {
         baseParams.system += schemaInstruction;
       } else if (Array.isArray(baseParams.system)) {
@@ -1446,6 +1473,9 @@ No markdown code blocks, no preamble text.`;
     }
     if (this.thinking) {
       baseParams.thinking = this.thinking;
+    } else if (this.vertexai && this.temperature !== void 0 && this.topP !== void 0) {
+      baseParams.temperature = this.temperature;
+      logger_default.debug("Vertex AI: Using temperature only (topP ignored)");
     } else {
       if (this.temperature !== void 0) baseParams.temperature = this.temperature;
       if (this.topP !== void 0) baseParams.top_p = this.topP;
@@ -1455,7 +1485,7 @@ No markdown code blocks, no preamble text.`;
     let data;
     let validationErrors = null;
     let lastResponse = null;
-    let cumPrompt = 0, cumResponse = 0, attempts = 0;
+    let cumPrompt = 0, cumResponse = 0, cumCacheCreate = 0, cumCacheRead = 0, attempts = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const params = { ...baseParams, messages: [{ role: (
         /** @type {'user'} */
@@ -1464,25 +1494,22 @@ No markdown code blocks, no preamble text.`;
       const response = await this.client.messages.create(params);
       lastResponse = response;
       attempts = attempt;
-      const perCall2 = this._usageFromResponse(response, attempt);
-      cumPrompt += perCall2.promptTokens;
-      cumResponse += perCall2.responseTokens;
-      this._captureMetadata(response);
+      cumPrompt += response?.usage?.input_tokens || 0;
+      cumResponse += response?.usage?.output_tokens || 0;
+      cumCacheCreate += response?.usage?.cache_creation_input_tokens || 0;
+      cumCacheRead += response?.usage?.cache_read_input_tokens || 0;
       text = this._extractText(response);
       if (!this._isStructured) {
         data = void 0;
         break;
       }
       try {
-        data = this._responseSchema && !this.vertexai ? JSON.parse(text) : extractJSON(text);
+        data = useNativeSchema ? JSON.parse(text) : extractJSON(text);
       } catch (e) {
         logger_default.warn(`Could not parse structured response: ${e.message}`);
         data = null;
       }
-      if (!usesFallbackSchema) {
-        validationErrors = null;
-        break;
-      }
+      if (!usesFallbackSchema) break;
       if (data === null) {
         validationErrors = ["$: could not parse any JSON from the model response"];
       } else {
@@ -1498,24 +1525,30 @@ Your previous response did not satisfy the required JSON schema:
 ${validationErrors.map((e) => `- ${e}`).join("\n")}
 
 Respond ONLY with corrected JSON that matches the schema. No markdown, no preamble.`;
-      } else {
+      } else if (this.validationMode === "strict") {
         logger_default.warn(`Structured output still invalid after ${attempt} attempt(s). Returning data: null with validationErrors.`);
         data = null;
+      } else {
+        logger_default.warn(`Structured output still invalid after ${attempt} attempt(s). validationMode='warn' \u2014 returning parsed data with validationErrors.`);
       }
     }
+    if (lastResponse) this._captureMetadata(lastResponse);
     this._cumulativeUsage = {
       promptTokens: cumPrompt,
       responseTokens: cumResponse,
       totalTokens: cumPrompt + cumResponse,
+      cacheCreationTokens: cumCacheCreate,
+      cacheReadTokens: cumCacheRead,
       attempts
     };
-    const perCall = this._usageFromResponse(lastResponse, attempts);
     const usage = {
-      ...perCall,
+      ...this._usageFromResponse(lastResponse, attempts),
       promptTokens: cumPrompt,
       responseTokens: cumResponse,
       totalTokens: cumPrompt + cumResponse,
-      estimatedCost: computeCost(perCall.modelVersion, cumPrompt, cumResponse) ?? computeCost(this.modelName, cumPrompt, cumResponse)
+      cacheCreationTokens: cumCacheCreate,
+      cacheReadTokens: cumCacheRead,
+      estimatedCost: this._estimatedCost(lastResponse?.model, cumPrompt, cumResponse, cumCacheCreate, cumCacheRead)
     };
     const result = { text, usage };
     if (this._isStructured) result.data = data;

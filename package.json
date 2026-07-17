@@ -2,7 +2,7 @@
 	"name": "ak-claude",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Claude AI Helper for doing... everything",
-	"version": "0.0.17",
+	"version": "0.1.0",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -18,7 +18,8 @@
 		"json-helpers.js",
 		"types.d.ts",
 		"logger.js",
-		"GUIDE.md"
+		"GUIDE.md",
+		"CHANGELOG.md"
 	],
 	"types": "types.d.ts",
 	"exports": {

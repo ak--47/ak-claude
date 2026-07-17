@@ -174,6 +174,10 @@ export interface MessageOptions extends BaseClaudeOptions {
   responseSchema?: Record<string, any>;
   /** Extra re-send attempts when a schema-fallback response (Vertex prompt-paste path) fails validation. 0 disables retry. Default 2. */
   validationRetries?: number;
+  /** How the Vertex fallback treats output that never satisfies the schema: 'strict' (default) returns data:null + validationErrors; 'warn' returns the parsed data anyway plus validationErrors. */
+  validationMode?: 'strict' | 'warn';
+  /** Opt in to native output_config structured outputs on Vertex AI (GA but gated by the org policy constraints/vertexai.allowedPartnerModelFeatures). Default false → prompt-paste fallback + validation. */
+  vertexNativeStructuredOutput?: boolean;
 }
 
 /** Tool declaration in Claude format */
@@ -526,8 +530,8 @@ export declare class BaseClaude {
   estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
     inputTokens: number;
     model: string;
-    pricing: { input: number; output: number };
-    estimatedInputCost: number;
+    pricing: { input: number; output: number } | null;
+    estimatedInputCost: number | null;
     note: string;
   }>;
   listModels(): AsyncGenerator<any, void, unknown>;

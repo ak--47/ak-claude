@@ -285,15 +285,20 @@ export function validateSchema(data, schema, path = '$') {
 	const errors = [];
 	if (!schema || typeof schema !== 'object') return errors;
 
-	// ── enum ──
+	// ── nullable (OpenAPI-style) ── a null value is valid on a nullable node.
+	if (data === null && schema.nullable === true) return errors;
+
+	// ── enum ── strict equality first, then deep-equal for object/array members.
 	if (Array.isArray(schema.enum)) {
-		const ok = schema.enum.some(v => v === data);
+		const target = JSON.stringify(data);
+		const ok = schema.enum.some(v => v === data || JSON.stringify(v) === target);
 		if (!ok) errors.push(`${path}: value ${JSON.stringify(data)} is not one of allowed enum values ${JSON.stringify(schema.enum)}`);
 	}
 
 	// ── type ──
 	if (schema.type !== undefined) {
 		const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+		if (schema.nullable === true) types.push('null');
 		if (!types.some(t => matchesType(data, t))) {
 			errors.push(`${path}: expected type ${types.join('|')} but got ${describeType(data)}`);
 			// If the type is wrong, deeper checks are meaningless — stop here for this node.
@@ -301,25 +306,25 @@ export function validateSchema(data, schema, path = '$') {
 		}
 	}
 
-	// ── object ──
+	// ── object ── (Object.hasOwn avoids prototype-chain keys like 'toString')
 	const isObject = data !== null && typeof data === 'object' && !Array.isArray(data);
 	if (isObject && (schema.properties || schema.required || schema.additionalProperties === false)) {
 		const props = schema.properties || {};
 
 		if (Array.isArray(schema.required)) {
 			for (const key of schema.required) {
-				if (!(key in data)) errors.push(`${path}: missing required property "${key}"`);
+				if (!Object.hasOwn(data, key)) errors.push(`${path}: missing required property "${key}"`);
 			}
 		}
 
 		if (schema.additionalProperties === false) {
 			for (const key of Object.keys(data)) {
-				if (!(key in props)) errors.push(`${path}: unexpected property "${key}" (additionalProperties is false)`);
+				if (!Object.hasOwn(props, key)) errors.push(`${path}: unexpected property "${key}" (additionalProperties is false)`);
 			}
 		}
 
 		for (const [key, subSchema] of Object.entries(props)) {
-			if (key in data) {
+			if (Object.hasOwn(data, key)) {
 				errors.push(...validateSchema(data[key], /** @type {any} */ (subSchema), `${path}.${key}`));
 			}
 		}
