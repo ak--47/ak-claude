@@ -4,7 +4,7 @@
  */
 
 import BaseClaude from './base.js';
-import { extractJSON } from './json-helpers.js';
+import { extractJSON, validateSchema } from './json-helpers.js';
 import log from './logger.js';
 
 /**
@@ -66,6 +66,30 @@ class Message extends BaseClaude {
 		this._responseSchema = options.responseSchema || null;
 		this._isStructured = !!(this._responseSchema || options.responseFormat === 'json');
 
+		// Extra re-send attempts when a schema-fallback response fails validation
+		// (Vertex prompt-paste path only). 0 disables retry. Default 2.
+		// NB: distinct from Transformer's `maxRetries` (validation self-heal) and
+		// BaseClaude's `maxRetries` (SDK-level 429 retry) — different knobs.
+		this.validationRetries = options.validationRetries ?? 2;
+
+		// How the fallback path treats output that never satisfies the schema:
+		//  'strict' (default) — return data:null + validationErrors (never invalid data)
+		//  'warn'             — return the parsed data anyway PLUS validationErrors
+		this.validationMode = options.validationMode === 'warn' ? 'warn' : 'strict';
+
+		// Opt in to native output_config structured outputs on Vertex. GA but gated
+		// by the Google Cloud org policy constraints/vertexai.allowedPartnerModelFeatures
+		// (default-deny per model). Leave false unless your org has enabled the
+		// `structured_outputs` feature — otherwise Vertex 400s. Default: prompt-paste
+		// fallback + validation.
+		this.vertexNativeStructuredOutput = options.vertexNativeStructuredOutput ?? false;
+
+		// Pre-serialize the schema instruction once (compact) — rebuilding a pretty-
+		// printed copy per send/retry inflates billed input tokens.
+		this._schemaInstruction = this._responseSchema
+			? `\n\nRespond ONLY with valid JSON matching this schema:\n${JSON.stringify(this._responseSchema)}\nNo markdown code blocks, no preamble text.`
+			: '';
+
 		log.debug(`Message created (structured=${this._isStructured}, nativeSchema=${!!this._responseSchema})`);
 	}
 
@@ -81,18 +105,7 @@ class Message extends BaseClaude {
 		await this._ensureClient();
 		log.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
 
-		if (this.healthCheck) {
-			try {
-				await this.client.messages.create({
-					model: this.modelName,
-					max_tokens: 1,
-					messages: [{ role: 'user', content: 'hi' }]
-				});
-				log.debug(`${this.constructor.name}: API connection successful.`);
-			} catch (e) {
-				throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-			}
-		}
+		await this._healthCheckPing();
 
 		this._initialized = true;
 		log.debug(`${this.constructor.name}: Initialized (stateless mode).`);
@@ -129,72 +142,140 @@ class Message extends BaseClaude {
 			}
 		}
 
+		// Native structured output (guaranteed valid JSON) is used on the direct API
+		// always, and on Vertex only when explicitly opted in. Otherwise Vertex uses
+		// the prompt-paste fallback, whose output can be schema-invalid — so we
+		// validate + retry only on that path.
+		const useNativeSchema = !!(this._responseSchema && (!this.vertexai || this.vertexNativeStructuredOutput));
+		const usesFallbackSchema = !!(this._responseSchema && this.vertexai && !this.vertexNativeStructuredOutput);
+		const retries = Math.max(0, Number(this.validationRetries) || 0);
+		const maxAttempts = usesFallbackSchema ? 1 + retries : 1;
+
 		/** @type {any} */
-		const params = {
+		const baseParams = {
 			model: this.modelName,
 			max_tokens: opts.maxTokens || this.maxTokens,
-			messages: [{ role: /** @type {'user'} */ ('user'), content: payloadStr }],
 			...(systemParam && { system: systemParam }),
 		};
 
-		// Native structured output via JSON Schema (not supported on Vertex AI)
-		if (this._responseSchema && !this.vertexai) {
-			params.output_config = {
+		// Native structured output via JSON Schema.
+		if (useNativeSchema) {
+			baseParams.output_config = {
 				format: {
 					type: 'json_schema',
 					schema: this._responseSchema
 				}
 			};
-		} else if (this._responseSchema && this.vertexai) {
-			// Fallback: inject schema into system prompt for Vertex AI
-			const schemaInstruction = `\n\nRespond ONLY with valid JSON matching this schema:\n${JSON.stringify(this._responseSchema, null, 2)}\nNo markdown code blocks, no preamble text.`;
-			if (typeof params.system === 'string') {
-				params.system += schemaInstruction;
-			} else if (Array.isArray(params.system)) {
-				params.system = [...params.system, { type: 'text', text: schemaInstruction }];
+		} else if (usesFallbackSchema) {
+			// Fallback: inject the (pre-serialized) schema into the system prompt.
+			const schemaInstruction = this._schemaInstruction;
+			if (typeof baseParams.system === 'string') {
+				baseParams.system += schemaInstruction;
+			} else if (Array.isArray(baseParams.system)) {
+				baseParams.system = [...baseParams.system, { type: 'text', text: schemaInstruction }];
 			} else {
-				params.system = schemaInstruction.trim();
+				baseParams.system = schemaInstruction.trim();
 			}
 		}
 
 		if (this.thinking) {
-			params.thinking = this.thinking;
+			baseParams.thinking = this.thinking;
+		} else if (this.vertexai && this.temperature !== undefined && this.topP !== undefined) {
+			// Vertex AI rejects temperature + top_p together — prefer temperature.
+			baseParams.temperature = this.temperature;
+			log.debug('Vertex AI: Using temperature only (topP ignored)');
 		} else {
-			if (this.temperature !== undefined) params.temperature = this.temperature;
-			if (this.topP !== undefined) params.top_p = this.topP;
+			if (this.temperature !== undefined) baseParams.temperature = this.temperature;
+			if (this.topP !== undefined) baseParams.top_p = this.topP;
 		}
 
-		const response = await this.client.messages.create(params);
-		this._captureMetadata(response);
+		let userContent = payloadStr;
+		let text = '';
+		let data;
+		/** @type {string[]|null} */
+		let validationErrors = null;
+		/** @type {any} */
+		let lastResponse = null;
+		let cumPrompt = 0, cumResponse = 0, cumCacheCreate = 0, cumCacheRead = 0, attempts = 0;
 
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			const params = { ...baseParams, messages: [{ role: /** @type {'user'} */ ('user'), content: userContent }] };
+			const response = await this.client.messages.create(params);
+			lastResponse = response;
+			attempts = attempt;
 
-		const text = this._extractText(response);
-		const result = {
-			text,
-			usage: this.getLastUsage()
-		};
+			// Accumulate usage across retries directly from THIS response's fields
+			// (concurrency-safe — never through mutable instance state after an await).
+			cumPrompt += response?.usage?.input_tokens || 0;
+			cumResponse += response?.usage?.output_tokens || 0;
+			cumCacheCreate += response?.usage?.cache_creation_input_tokens || 0;
+			cumCacheRead += response?.usage?.cache_read_input_tokens || 0;
 
-		// Parse structured data if configured
-		if (this._isStructured) {
+			text = this._extractText(response);
+
+			if (!this._isStructured) { data = undefined; break; }
+
+			// Parse
 			try {
-				if (this._responseSchema && !this.vertexai) {
-					// Native structured output — guaranteed valid JSON
-					result.data = JSON.parse(text);
-				} else {
-					// Fallback — extract JSON from potentially messy text
-					result.data = extractJSON(text);
-				}
+				data = useNativeSchema
+					? JSON.parse(text)          // native — guaranteed valid JSON
+					: extractJSON(text);        // fallback — extract from messy text
 			} catch (e) {
 				log.warn(`Could not parse structured response: ${e.message}`);
-				result.data = null;
+				data = null;
+			}
+
+			// Validation + retry only on the fallback (Vertex prompt-paste) path.
+			if (!usesFallbackSchema) break;
+
+			if (data === null) {
+				validationErrors = ['$: could not parse any JSON from the model response'];
+			} else {
+				const errs = validateSchema(data, this._responseSchema);
+				validationErrors = errs.length ? errs : null;
+			}
+
+			if (!validationErrors) break; // valid — done
+
+			if (attempt < maxAttempts) {
+				log.warn(`Structured output failed schema validation (attempt ${attempt}/${maxAttempts}): ${validationErrors.join('; ')}. Retrying with error feedback.`);
+				userContent = `${payloadStr}\n\nYour previous response did not satisfy the required JSON schema:\n${validationErrors.map(e => `- ${e}`).join('\n')}\n\nRespond ONLY with corrected JSON that matches the schema. No markdown, no preamble.`;
+			} else if (this.validationMode === 'strict') {
+				// strict (default): never return a schema-invalid object as success.
+				log.warn(`Structured output still invalid after ${attempt} attempt(s). Returning data: null with validationErrors.`);
+				data = null;
+			} else {
+				// warn: return the (invalid) parsed data anyway, plus validationErrors.
+				log.warn(`Structured output still invalid after ${attempt} attempt(s). validationMode='warn' — returning parsed data with validationErrors.`);
 			}
 		}
+
+		// Capture instance metadata ONCE, after the loop (last-write-wins; unsafe
+		// under concurrency — callers should prefer result.usage).
+		if (lastResponse) this._captureMetadata(lastResponse);
+		this._cumulativeUsage = {
+			promptTokens: cumPrompt,
+			responseTokens: cumResponse,
+			totalTokens: cumPrompt + cumResponse,
+			cacheCreationTokens: cumCacheCreate,
+			cacheReadTokens: cumCacheRead,
+			attempts
+		};
+
+		const usage = {
+			...this._usageFromResponse(lastResponse, attempts),
+			promptTokens: cumPrompt,
+			responseTokens: cumResponse,
+			totalTokens: cumPrompt + cumResponse,
+			cacheCreationTokens: cumCacheCreate,
+			cacheReadTokens: cumCacheRead,
+			estimatedCost: this._estimatedCost(lastResponse?.model, cumPrompt, cumResponse, cumCacheCreate, cumCacheRead)
+		};
+
+		/** @type {any} */
+		const result = { text, usage };
+		if (this._isStructured) result.data = data;
+		if (validationErrors) result.validationErrors = validationErrors;
 
 		return result;
 	}

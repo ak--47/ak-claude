@@ -37,6 +37,8 @@ export interface UsageData {
   /** Stop reason (e.g., 'end_turn', 'tool_use', 'max_tokens') */
   stopReason: string | null;
   timestamp: number;
+  /** Estimated USD cost from MODEL_PRICING (input+output). null when the model's pricing is unknown. */
+  estimatedCost?: number | null;
 }
 
 export interface TransformationExample {
@@ -170,6 +172,12 @@ export interface MessageOptions extends BaseClaudeOptions {
   responseFormat?: 'json';
   /** JSON Schema for native structured output via output_config. When provided, the API guarantees valid JSON matching this schema. */
   responseSchema?: Record<string, any>;
+  /** Extra re-send attempts when a schema-fallback response (Vertex prompt-paste path) fails validation. 0 disables retry. Default 2. */
+  validationRetries?: number;
+  /** How the Vertex fallback treats output that never satisfies the schema: 'strict' (default) returns data:null + validationErrors; 'warn' returns the parsed data anyway plus validationErrors. */
+  validationMode?: 'strict' | 'warn';
+  /** Opt in to native output_config structured outputs on Vertex AI (GA but gated by the org policy constraints/vertexai.allowedPartnerModelFeatures). Default false → prompt-paste fallback + validation. */
+  vertexNativeStructuredOutput?: boolean;
 }
 
 /** Tool declaration in Claude format */
@@ -421,6 +429,8 @@ export interface MessageResponse {
   text: string;
   data?: any;
   usage: UsageData | null;
+  /** Schema validation errors when a fallback structured-output response could not be made valid (data will be null). Absent on success. */
+  validationErrors?: string[];
 }
 
 export interface RagCitation {
@@ -520,8 +530,8 @@ export declare class BaseClaude {
   estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
     inputTokens: number;
     model: string;
-    pricing: { input: number; output: number };
-    estimatedInputCost: number;
+    pricing: { input: number; output: number } | null;
+    estimatedInputCost: number | null;
     note: string;
   }>;
   listModels(): AsyncGenerator<any, void, unknown>;
@@ -648,6 +658,15 @@ export declare class AgentQuery {
 
 export declare function extractJSON(text: string): any;
 export declare function attemptJSONRecovery(text: string, maxAttempts?: number): any | null;
+/** Validates a parsed value against a subset of JSON Schema. Returns error strings ([] means valid). */
+export declare function validateSchema(data: any, schema: Record<string, any>, path?: string): string[];
+
+/** Per-million-token pricing keyed by model id. */
+export declare const MODEL_PRICING: Record<string, { input: number; output: number }>;
+/** Resolves pricing for a model id (handles Vertex dated snapshots). null when unknown. */
+export declare function resolvePricing(modelId: string | null | undefined): { input: number; output: number } | null;
+/** Estimated USD cost from token counts. null when the model's pricing is unknown. */
+export declare function computeCost(modelId: string | null | undefined, promptTokens: number, responseTokens: number): number | null;
 
 declare const _default: {
   Transformer: typeof Transformer;

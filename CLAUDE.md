@@ -74,7 +74,8 @@ Shared foundation. Not typically instantiated directly.
 - `init(force?)` — Validates connectivity; runs a tiny `messages.create()` health check only if `healthCheck: true`
 - `seed(examples, opts?)` — Add example pairs to chat history for few-shot learning
 - `getHistory(curated?)` / `clearHistory()` — Manage chat history. `curated: true` returns text-only simplified history
-- `getLastUsage()` — Structured usage data after API calls (includes `cacheCreationTokens`, `cacheReadTokens`)
+- `getLastUsage()` — Structured usage data after API calls (includes `cacheCreationTokens`, `cacheReadTokens`, and `estimatedCost` from MODEL_PRICING — `null` if unpriced). Reflects the instance's LAST call; unsafe under concurrent `send()`s — prefer the per-call `result.usage` (computed synchronously from that response via `_usageFromResponse()`)
+- `resolvePricing(modelId)` / `computeCost(modelId, in, out)` — pricing helpers; handle Vertex dated snapshots (`model@YYYYMMDD`), return `null` for unknown models (exported from index)
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation via `messages.countTokens()`
 - `listModels()` — List all available models from the Anthropic API (direct API only, not Vertex AI)
 - `getModel(modelId)` — Get detailed information about a specific model (direct API only, not Vertex AI)
@@ -102,8 +103,9 @@ Multi-turn text conversation. Extends BaseClaude.
 
 ### Message (`message.js`)
 Stateless one-off messages. Uses `messages.create()` directly. Extends BaseClaude.
-- `send(payload, opts?)` -> `{ text, data?, usage }`
-- Supports native structured output via `responseSchema` (uses `output_config.format.json_schema`)
+- `send(payload, opts?)` -> `{ text, data?, usage, validationErrors? }`
+- Supports native structured output via `responseSchema` (uses `output_config.format.json_schema`) on the direct API
+- On **Vertex AI**, `responseSchema` falls back to system-prompt injection (native `output_config` is org-policy-gated), then **validates the parsed object against the schema** and retries with error feedback (`validationRetries`, default 2). Invalid output returns `data: null` + `result.validationErrors` — never a schema-invalid object as success
 - Supports fallback JSON mode via `responseFormat: 'json'` (system prompt hacking)
 - `getHistory()`, `clearHistory()`, `seed()` are no-ops
 
@@ -167,7 +169,7 @@ npm run typecheck          # Verify TypeScript definitions
 - `ANTHROPIC_API_KEY` — Anthropic API key (primary, for direct API auth)
 - `CLAUDE_API_KEY` — Anthropic API key (fallback)
 - `GOOGLE_CLOUD_PROJECT` — GCP project ID (for Vertex AI auth)
-- `GOOGLE_CLOUD_LOCATION` — GCP region (for Vertex AI auth, default: `us-east5`)
+- `GOOGLE_CLOUD_LOCATION` — GCP region (for Vertex AI auth, default: `global`). Precedence: `vertexRegion` option > this env var > `global`. Use `global`/`us`/`eu` for Claude 5-family models; specific regions (e.g. `us-east5`) only serve Sonnet 4.6 and earlier
 - `NODE_ENV` — Environment (dev/test/prod affects log levels)
 - `LOG_LEVEL` — Override log level (debug/info/warn/error)
 
@@ -192,7 +194,8 @@ new Transformer(); // auto-detects from env
 ```javascript
 // Named exports
 import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, AgentQuery, BaseClaude, log } from 'ak-claude';
-import { extractJSON, attemptJSONRecovery } from 'ak-claude';
+import { extractJSON, attemptJSONRecovery, validateSchema } from 'ak-claude';
+import { MODEL_PRICING, resolvePricing, computeCost } from 'ak-claude';
 
 // Default export (namespace object)
 import AI from 'ak-claude';
@@ -368,12 +371,12 @@ if (await modelExists(chat, 'claude-opus-4-6')) {
 
 ## Testing Strategy
 
-- "No mocks" approach — all tests use real Anthropic API calls
+- **Two test tiers:** (1) live-API suites (`*.test.js`) use real Anthropic API calls — no mocks; (2) `consumer-fixes.test.js` is offline/mocked (stubs the client on the instance) and safe to run anytime for the 0.1.0 fix logic
 - **Do NOT run tests during development** — they are slow (real API calls) and expensive. Use `npm run typecheck` and `npm run build:cjs` to verify changes.
 - Test timeout: 30 seconds (AI calls take 5-15 seconds)
 - Rate limiting (429 errors) can cause flaky failures — retry after waiting
 - Test model: use `claude-haiku-4-5-20251001` for tests (cheapest, fastest)
-- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `json-helpers.test.js`
+- Test files: `base.test.js`, `transformer.test.js`, `chat.test.js`, `message.test.js`, `tool-agent.test.js`, `code-agent.test.js`, `rag-agent.test.js`, `json-helpers.test.js`, `consumer-fixes.test.js` (offline/mocked)
 
 ## Key Design Patterns
 

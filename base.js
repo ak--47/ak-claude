@@ -34,16 +34,78 @@ const MODEL_PRICING = {
 	'claude-opus-4-8': { input: 5.00, output: 25.00 },
 	'claude-opus-4-7': { input: 5.00, output: 25.00 },
 	'claude-opus-4-6': { input: 5.00, output: 25.00 },
+	'claude-opus-4-5': { input: 15.00, output: 75.00 },
 	'claude-opus-4-5-20250514': { input: 15.00, output: 75.00 },
 	// Sonnet 4.x
 	'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
+	'claude-sonnet-4-5': { input: 3.00, output: 15.00 },
 	'claude-sonnet-4-5-20250514': { input: 3.00, output: 15.00 },
 	// Haiku
 	'claude-haiku-4-5': { input: 1.00, output: 5.00 },
 	'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
 };
 
-export { MODEL_PRICING, DEFAULT_MAX_TOKENS };
+/**
+ * Resolves pricing for a model id.
+ * Handles Vertex dated snapshots (`claude-opus-4-5@20250514`) by falling back to
+ * the bare id. Returns null when the model's pricing is unknown.
+ * @param {string|null|undefined} modelId
+ * @returns {{ input: number, output: number }|null}
+ */
+function resolvePricing(modelId) {
+	if (!modelId) return null;
+	if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
+	// Vertex dated snapshots use an `@` separator, e.g. claude-opus-4-5@20250514.
+	// Try the hyphen-dated key first (some models have a dedicated dated price).
+	if (modelId.includes('@')) {
+		const hyphenated = modelId.replace('@', '-');
+		if (MODEL_PRICING[hyphenated]) return MODEL_PRICING[hyphenated];
+	}
+	// Strip a trailing dated snapshot (@YYYYMMDD or -YYYYMMDD) and retry the bare id
+	// — the direct API echoes hyphen-dated builds (claude-sonnet-4-6-20250514) even
+	// when the bare id (claude-sonnet-4-6) is the priced one. `\d{6,8}` avoids
+	// eating single-digit version parts like the `-6` in claude-sonnet-4-6.
+	const bare = modelId.replace(/[-@]\d{6,8}$/, '');
+	if (bare !== modelId && MODEL_PRICING[bare]) return MODEL_PRICING[bare];
+	return null;
+}
+
+/** Anthropic cache-token multipliers relative to the base input rate. */
+const CACHE_WRITE_MULTIPLIER = 1.25; // cache_creation_input_tokens
+const CACHE_READ_MULTIPLIER = 0.1;   // cache_read_input_tokens
+
+/**
+ * Computes estimated USD cost from token counts using MODEL_PRICING.
+ * `input_tokens` from the API EXCLUDES cache tokens, so cache-write (1.25x input)
+ * and cache-read (0.1x input) are added on top.
+ * @param {string|null|undefined} modelId
+ * @param {number} promptTokens
+ * @param {number} responseTokens
+ * @param {number} [cacheCreationTokens=0]
+ * @param {number} [cacheReadTokens=0]
+ * @returns {number|null} Cost in USD, or null when pricing is unknown.
+ */
+function computeCost(modelId, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
+	const pricing = resolvePricing(modelId);
+	if (!pricing) return null;
+	return (promptTokens / 1_000_000) * pricing.input
+		+ (responseTokens / 1_000_000) * pricing.output
+		+ (cacheCreationTokens / 1_000_000) * pricing.input * CACHE_WRITE_MULTIPLIER
+		+ (cacheReadTokens / 1_000_000) * pricing.input * CACHE_READ_MULTIPLIER;
+}
+
+/**
+ * Vertex endpoint types that route to the current Claude 5-family models.
+ * `global` (recommended, no premium), and the `us`/`eu` multi-region endpoints.
+ * Any other value is a specific regional endpoint (e.g. us-east5) that only
+ * serves Claude Sonnet 4.6 and earlier.
+ */
+const GLOBAL_OR_MULTIREGION = new Set(['global', 'us', 'eu']);
+
+/** Models that require a global/multi-region Vertex endpoint (not a specific region). */
+const CLAUDE5_FAMILY_REGEX = /^claude-(sonnet-5|opus-4-[78]|fable-5|mythos)/;
+
+export { MODEL_PRICING, DEFAULT_MAX_TOKENS, resolvePricing, computeCost };
 
 // ── BaseClaude Class ─────────────────────────────────────────────────────────
 
@@ -76,9 +138,14 @@ class BaseClaude {
 		}
 
 		// ── Vertex AI ──
+		// Region precedence: explicit vertexRegion option > GOOGLE_CLOUD_LOCATION env > 'global'.
+		// 'global' is the recommended default — it routes dynamically, serves the
+		// current Claude 5-family models, and carries no 10% regional premium.
+		// Specific regional endpoints (e.g. us-east5) only serve Claude Sonnet 4.6
+		// and earlier; set vertexRegion explicitly if you need data residency.
 		this.vertexai = options.vertexai ?? false;
 		this.vertexProjectId = options.vertexProjectId ?? process.env.GOOGLE_CLOUD_PROJECT ?? undefined;
-		this.vertexRegion = options.vertexRegion ?? process.env.GOOGLE_CLOUD_LOCATION ?? 'us-east5';
+		this.vertexRegion = options.vertexRegion ?? process.env.GOOGLE_CLOUD_LOCATION ?? 'global';
 
 		// ── Auth ──
 		if (!this.vertexai) {
@@ -204,6 +271,11 @@ class BaseClaude {
 			this.clients.raw = this.client;
 			this._clientReady = true;
 			log.debug(`${this.constructor.name}: Vertex AI client created (project=${this.vertexProjectId}, region=${this.vertexRegion})`);
+			// Warn on a known-bad pairing: Claude 5-family models need a global/
+			// multi-region endpoint; specific regional endpoints won't serve them.
+			if (CLAUDE5_FAMILY_REGEX.test(this.modelName) && !GLOBAL_OR_MULTIREGION.has(this.vertexRegion)) {
+				log.warn(`Model "${this.modelName}" may not be served by the regional Vertex endpoint "${this.vertexRegion}". Claude 5-family models require the "global" (recommended) or a multi-region ("us"/"eu") endpoint. Set vertexRegion: 'global' or GOOGLE_CLOUD_LOCATION=global.`);
+			}
 		}
 	}
 
@@ -221,21 +293,31 @@ class BaseClaude {
 		await this._ensureClient();
 		log.debug(`Initializing ${this.constructor.name} with model: ${this.modelName}...`);
 
-		if (this.healthCheck) {
-			try {
-				await this.client.messages.create({
-					model: this.modelName,
-					max_tokens: 1,
-					messages: [{ role: 'user', content: 'hi' }]
-				});
-				log.debug(`${this.constructor.name}: API connection successful.`);
-			} catch (e) {
-				throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
-			}
-		}
+		await this._healthCheckPing();
 
 		this._initialized = true;
 		log.debug(`${this.constructor.name}: Initialized.`);
+	}
+
+	/**
+	 * Opt-in connectivity check — runs a tiny messages.create() only when
+	 * `healthCheck: true`. Requires the client to be ready (call after
+	 * `_ensureClient()`).
+	 * @returns {Promise<void>}
+	 * @protected
+	 */
+	async _healthCheckPing() {
+		if (!this.healthCheck) return;
+		try {
+			await this.client.messages.create({
+				model: this.modelName,
+				max_tokens: 1,
+				messages: [{ role: 'user', content: 'hi' }]
+			});
+			log.debug(`${this.constructor.name}: API connection successful.`);
+		} catch (e) {
+			throw new Error(`${this.constructor.name} initialization failed: ${e.message}`);
+		}
 	}
 
 	// ── Core Message Sending ─────────────────────────────────────────────────
@@ -544,17 +626,74 @@ class BaseClaude {
 		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
 		const useCumulative = cumulative.attempts > 0;
 
+		const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
+		const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
+		const totalTokens = useCumulative ? cumulative.totalTokens : meta.totalTokens;
+		// Cache tokens accumulate across retries when tracked (Message); otherwise
+		// fall back to the last response's values (single-call classes).
+		const cacheCreationTokens = useCumulative && cumulative.cacheCreationTokens !== undefined ? cumulative.cacheCreationTokens : meta.cacheCreationTokens;
+		const cacheReadTokens = useCumulative && cumulative.cacheReadTokens !== undefined ? cumulative.cacheReadTokens : meta.cacheReadTokens;
+
 		return {
-			promptTokens: useCumulative ? cumulative.promptTokens : meta.promptTokens,
-			responseTokens: useCumulative ? cumulative.responseTokens : meta.responseTokens,
-			totalTokens: useCumulative ? cumulative.totalTokens : meta.totalTokens,
-			cacheCreationTokens: meta.cacheCreationTokens,
-			cacheReadTokens: meta.cacheReadTokens,
+			promptTokens,
+			responseTokens,
+			totalTokens,
+			cacheCreationTokens,
+			cacheReadTokens,
 			attempts: useCumulative ? cumulative.attempts : 1,
 			modelVersion: meta.modelVersion,
 			requestedModel: meta.requestedModel,
 			stopReason: meta.stopReason,
-			timestamp: meta.timestamp
+			timestamp: meta.timestamp,
+			estimatedCost: this._estimatedCost(meta.modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
+		};
+	}
+
+	/**
+	 * Estimated USD cost, preferring the model id the API echoed (`modelVersion`)
+	 * and falling back to the requested model when that build isn't priced.
+	 * @param {string|null|undefined} modelVersion
+	 * @param {number} promptTokens
+	 * @param {number} responseTokens
+	 * @param {number} [cacheCreationTokens=0]
+	 * @param {number} [cacheReadTokens=0]
+	 * @returns {number|null}
+	 * @protected
+	 */
+	_estimatedCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
+		return computeCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
+			?? computeCost(this.modelName, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens);
+	}
+
+	/**
+	 * Builds a usage object directly from a single API response, WITHOUT reading
+	 * mutable instance state (`lastResponseMetadata`/`_cumulativeUsage`). Safe to
+	 * call under concurrent send() calls on a shared instance — unlike
+	 * getLastUsage(), which reflects whichever call most recently mutated the
+	 * instance and can cross-talk between concurrent sends.
+	 * @param {Object} response - A single messages.create() response
+	 * @param {number} [attempts=1] - Attempts this call consumed
+	 * @returns {UsageData}
+	 * @protected
+	 */
+	_usageFromResponse(response, attempts = 1) {
+		const promptTokens = response?.usage?.input_tokens || 0;
+		const responseTokens = response?.usage?.output_tokens || 0;
+		const cacheCreationTokens = response?.usage?.cache_creation_input_tokens || 0;
+		const cacheReadTokens = response?.usage?.cache_read_input_tokens || 0;
+		const modelVersion = response?.model || null;
+		return {
+			promptTokens,
+			responseTokens,
+			totalTokens: promptTokens + responseTokens,
+			cacheCreationTokens,
+			cacheReadTokens,
+			attempts,
+			modelVersion,
+			requestedModel: this.modelName,
+			stopReason: response?.stop_reason || null,
+			timestamp: Date.now(),
+			estimatedCost: this._estimatedCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
 		};
 	}
 
@@ -602,14 +741,16 @@ class BaseClaude {
 	 */
 	async estimateCost(nextPayload) {
 		const tokenInfo = await this.estimate(nextPayload);
-		const pricing = MODEL_PRICING[this.modelName] || { input: 0, output: 0 };
+		const pricing = resolvePricing(this.modelName);
 
 		return {
 			inputTokens: tokenInfo.inputTokens,
 			model: this.modelName,
 			pricing,
-			estimatedInputCost: (tokenInfo.inputTokens / 1_000_000) * pricing.input,
-			note: 'Cost is for input tokens only; output cost depends on response length'
+			estimatedInputCost: pricing ? (tokenInfo.inputTokens / 1_000_000) * pricing.input : null,
+			note: pricing
+				? 'Cost is for input tokens only; output cost depends on response length'
+				: `No pricing known for model "${this.modelName}"; estimatedInputCost is null`
 		};
 	}
 

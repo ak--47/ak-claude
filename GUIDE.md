@@ -77,11 +77,15 @@ new Chat({ vertexai: true });
 new Chat({
   vertexai: true,
   vertexProjectId: 'my-gcp-project',    // or GOOGLE_CLOUD_PROJECT env var
-  vertexRegion: 'us-central1'           // or GOOGLE_CLOUD_LOCATION env var (default: 'us-east5')
+  vertexRegion: 'global'                // or GOOGLE_CLOUD_LOCATION env var (default: 'global')
 });
 ```
 
 When `vertexai: true`, the Anthropic client is created lazily using `@anthropic-ai/vertex-sdk` (included as a dependency). No API key is required — authentication flows through Google Cloud's Application Default Credentials (ADC). This is ideal for server deployments on GCP, CI/CD pipelines with service accounts, or local development with `gcloud auth`.
+
+**Region precedence:** `vertexRegion` option > `GOOGLE_CLOUD_LOCATION` env var > `'global'` (default). The resolved region is logged at debug on client construction.
+
+**Which region?** `'global'` is the recommended default — it routes dynamically, serves the current Claude 5-family models (`claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-4-7`), and carries no 10% regional premium. Specific regional endpoints (e.g. `us-east5`) only serve **Claude Sonnet 4.6 and earlier** — set one explicitly only if you need data residency, and expect a warning if you pair one with a Claude 5-family model. Multi-region endpoints (`'us'`, `'eu'`) also serve the newer models.
 
 ### API Key (direct Anthropic API)
 
@@ -168,7 +172,15 @@ console.log(result.data);
 // { people: ['Alice', 'Bob'], places: ['Paris'], sentiment: 'positive' }
 ```
 
-When `responseSchema` is provided, the API guarantees valid JSON matching your schema via `output_config`. The parsed object is available as `result.data`; the raw string is `result.text`.
+When `responseSchema` is provided over the **direct Anthropic API**, the API guarantees valid JSON matching your schema via `output_config`. The parsed object is available as `result.data`; the raw string is `result.text`.
+
+> **On Vertex AI**, ak-claude falls back to pasting the schema into the system prompt (native `output_config` on Vertex is GA but gated by the org policy `constraints/vertexai.allowedPartnerModelFeatures`, default-deny per model). Because the model isn't *forced* to comply, `send()` **validates** the parsed object against your schema and, on failure, retries with the validation errors fed back to the model (`validationRetries`, default 2). If it still can't produce a valid object, `result.data` is `null` and `result.validationErrors` lists why — a schema-invalid object is **never** returned as success. Options:
+>
+> - `validationRetries: 0` — disable retries (still validates; still nulls invalid data).
+> - `validationMode: 'warn'` — return the parsed (invalid) data anyway, plus `result.validationErrors`, instead of nulling it.
+> - `vertexNativeStructuredOutput: true` — use native `output_config` on Vertex (only if your org has enabled the `structured_outputs` feature; otherwise Vertex returns a 400).
+>
+> **Validator keyword support** (`validateSchema`): `type` (incl. arrays and `integer`), `required`, `properties`, `additionalProperties: false`, `items` (single schema), `enum` (deep-equal), `nullable: true`. `anyOf`/`oneOf`/`allOf`/`$ref` are pass-through (not enforced).
 
 ### Fallback JSON Mode
 
@@ -939,9 +951,14 @@ const usage = instance.getLastUsage();
 //   modelVersion: 'claude-sonnet-4-6-20250514',  // actual model that responded
 //   requestedModel: 'claude-sonnet-4-6',          // model you requested
 //   stopReason: 'end_turn',     // 'end_turn', 'tool_use', 'max_tokens'
-//   timestamp: 1710000000000
+//   timestamp: 1710000000000,
+//   estimatedCost: 0.00123      // USD from MODEL_PRICING; null if model unpriced
 // }
 ```
+
+> **`estimatedCost` includes cache-token billing:** cache-write tokens are priced at 1.25× the input rate and cache-read at 0.1× (Anthropic's rates), on top of `input_tokens`/`output_tokens`. Returns `null` when the model is unpriced.
+
+> **Concurrency:** `getLastUsage()` reflects the **instance's last completed call** and mutates on every `send()` — it is **not** safe to read across concurrent sends on a shared instance. The **stateless** `Message` class returns a per-call **`result.usage`** computed synchronously from that call's own response(s), which *is* concurrency-safe — use it when sharing one instance across concurrent calls. The stateful classes (`Chat`, `Transformer`, `RagAgent`, `ToolAgent`, `CodeAgent`) maintain history/rounds and are not designed to be shared across concurrent calls; their `result.usage` is derived from instance state.
 
 ### Cost Estimation
 
@@ -1411,7 +1428,7 @@ const { Transformer, Chat } = require('ak-claude');
 | `apiKey` | string | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` env var (not needed with `vertexai`) |
 | `vertexai` | boolean | `false` (use Vertex AI auth via ADC) |
 | `vertexProjectId` | string | `GOOGLE_CLOUD_PROJECT` env var |
-| `vertexRegion` | string | `'us-east5'` or `GOOGLE_CLOUD_LOCATION` env var |
+| `vertexRegion` | string | `'global'` (default) or `GOOGLE_CLOUD_LOCATION` env var. Use `'global'`/`'us'`/`'eu'` for Claude 5-family models |
 | `maxTokens` | number | `8192` |
 | `temperature` | number | `0.7` (ignored with thinking) |
 | `topP` | number | `0.95` (ignored with thinking) |

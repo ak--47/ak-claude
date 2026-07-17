@@ -2,7 +2,7 @@
 	"name": "ak-claude",
 	"author": "ak@mixpanel.com",
 	"description": "AK's Claude AI Helper for doing... everything",
-	"version": "0.0.14",
+	"version": "0.1.0",
 	"main": "index.js",
 	"files": [
 		"index.js",
@@ -18,7 +18,8 @@
 		"json-helpers.js",
 		"types.d.ts",
 		"logger.js",
-		"GUIDE.md"
+		"GUIDE.md",
+		"CHANGELOG.md"
 	],
 	"types": "types.d.ts",
 	"exports": {
@@ -64,7 +65,7 @@
 	],
 	"license": "ISC",
 	"dependencies": {
-		"@anthropic-ai/sdk": "^0.110.0",
+		"@anthropic-ai/sdk": "^0.112.2",
 		"@anthropic-ai/vertex-sdk": "^0.19.0",
 		"dotenv": "^17.3.1",
 		"pino": "^10.3.1",

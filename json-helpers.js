@@ -268,6 +268,107 @@ function findCompleteJSONStructures(text) {
 }
 
 /**
+ * Validates a parsed value against a (subset of) JSON Schema. Dependency-light —
+ * intended to guard fallback structured-output paths where the model isn't forced
+ * to emit schema-valid JSON (e.g. Vertex prompt-paste).
+ *
+ * Supported keywords: `type` (string or array of strings; 'integer' checks for
+ * whole numbers), `required`, `properties`, `additionalProperties: false`,
+ * `items` (single schema), `enum`. Unknown keywords are ignored (lenient).
+ *
+ * @param {*} data - The parsed value to validate
+ * @param {Object} schema - JSON Schema object
+ * @param {string} [path='$'] - Internal: JSON path prefix for error messages
+ * @returns {string[]} Array of human-readable error strings; empty means valid.
+ */
+export function validateSchema(data, schema, path = '$') {
+	const errors = [];
+	if (!schema || typeof schema !== 'object') return errors;
+
+	// ── nullable (OpenAPI-style) ── a null value is valid on a nullable node.
+	if (data === null && schema.nullable === true) return errors;
+
+	// ── enum ── strict equality first, then deep-equal for object/array members.
+	if (Array.isArray(schema.enum)) {
+		const target = JSON.stringify(data);
+		const ok = schema.enum.some(v => v === data || JSON.stringify(v) === target);
+		if (!ok) errors.push(`${path}: value ${JSON.stringify(data)} is not one of allowed enum values ${JSON.stringify(schema.enum)}`);
+	}
+
+	// ── type ──
+	if (schema.type !== undefined) {
+		const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+		if (schema.nullable === true) types.push('null');
+		if (!types.some(t => matchesType(data, t))) {
+			errors.push(`${path}: expected type ${types.join('|')} but got ${describeType(data)}`);
+			// If the type is wrong, deeper checks are meaningless — stop here for this node.
+			return errors;
+		}
+	}
+
+	// ── object ── (Object.hasOwn avoids prototype-chain keys like 'toString')
+	const isObject = data !== null && typeof data === 'object' && !Array.isArray(data);
+	if (isObject && (schema.properties || schema.required || schema.additionalProperties === false)) {
+		const props = schema.properties || {};
+
+		if (Array.isArray(schema.required)) {
+			for (const key of schema.required) {
+				if (!Object.hasOwn(data, key)) errors.push(`${path}: missing required property "${key}"`);
+			}
+		}
+
+		if (schema.additionalProperties === false) {
+			for (const key of Object.keys(data)) {
+				if (!Object.hasOwn(props, key)) errors.push(`${path}: unexpected property "${key}" (additionalProperties is false)`);
+			}
+		}
+
+		for (const [key, subSchema] of Object.entries(props)) {
+			if (Object.hasOwn(data, key)) {
+				errors.push(...validateSchema(data[key], /** @type {any} */ (subSchema), `${path}.${key}`));
+			}
+		}
+	}
+
+	// ── array ──
+	if (Array.isArray(data) && schema.items && typeof schema.items === 'object' && !Array.isArray(schema.items)) {
+		data.forEach((item, i) => {
+			errors.push(...validateSchema(item, schema.items, `${path}[${i}]`));
+		});
+	}
+
+	return errors;
+}
+
+/**
+ * @param {*} value
+ * @param {string} type - JSON Schema type name
+ * @returns {boolean}
+ */
+function matchesType(value, type) {
+	switch (type) {
+		case 'string': return typeof value === 'string';
+		case 'number': return typeof value === 'number' && !Number.isNaN(value);
+		case 'integer': return typeof value === 'number' && Number.isInteger(value);
+		case 'boolean': return typeof value === 'boolean';
+		case 'object': return value !== null && typeof value === 'object' && !Array.isArray(value);
+		case 'array': return Array.isArray(value);
+		case 'null': return value === null;
+		default: return true; // unknown type keyword — be lenient
+	}
+}
+
+/**
+ * @param {*} value
+ * @returns {string}
+ */
+function describeType(value) {
+	if (value === null) return 'null';
+	if (Array.isArray(value)) return 'array';
+	return typeof value;
+}
+
+/**
  * Extracts valid JSON from model response text using multiple strategies.
  * @param {string} text - The model response text
  * @returns {Object} - Parsed JSON object

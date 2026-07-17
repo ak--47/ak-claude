@@ -516,7 +516,7 @@ All classes (except AgentQuery) accept `BaseClaudeOptions`:
 | `apiKey` | string | env var | Anthropic API key (not needed with `vertexai`) |
 | `vertexai` | boolean | `false` | Use Vertex AI auth (Application Default Credentials) |
 | `vertexProjectId` | string | `GOOGLE_CLOUD_PROJECT` | GCP project ID (Vertex AI only) |
-| `vertexRegion` | string | `'us-east5'` | GCP region (Vertex AI only) |
+| `vertexRegion` | string | `'global'` | GCP region (Vertex AI only). `'global'`/`'us'`/`'eu'` serve Claude 5-family models; specific regions (e.g. `us-east5`) serve Sonnet 4.6 and earlier |
 | `maxTokens` | number | `8192` | Max tokens in response |
 | `temperature` | number | `0.7` | Temperature (not used with thinking) |
 | `topP` | number | `0.95` | Top-P (not used with thinking) |

@@ -80,7 +80,7 @@ Most constructor options are shared. The table below covers the differences.
 | `resourceExhaustedDelay` | Not available | Anthropic SDK handles backoff internally |
 | `vertexai` | `vertexai` | Same — `true` to use Vertex AI auth via ADC |
 | `project` | `vertexProjectId` | **Renamed.** Or `GOOGLE_CLOUD_PROJECT` env var |
-| `location` | `vertexRegion` | **Renamed.** Or `GOOGLE_CLOUD_LOCATION` env var (default: `us-east5`) |
+| `location` | `vertexRegion` | **Renamed.** Or `GOOGLE_CLOUD_LOCATION` env var (default: `global`) |
 | `labels` | Not available | No billing labels |
 | `cachedContent` | Not available | No cache CRUD API. Use `cacheSystemPrompt` instead |
 | `healthCheck` | `healthCheck` | Same — opt-in connectivity check during `init()` |
