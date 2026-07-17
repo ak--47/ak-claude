@@ -137,7 +137,8 @@ class Message extends BaseClaude {
 		// pasted into the prompt), so a fallback response can be schema-invalid.
 		// Validate + retry only on that path; the native path is guaranteed valid.
 		const usesFallbackSchema = !!(this._responseSchema && this.vertexai);
-		const maxAttempts = usesFallbackSchema ? 1 + Math.max(0, this.validationRetries) : 1;
+		const retries = Math.max(0, Number(this.validationRetries) || 0);
+		const maxAttempts = usesFallbackSchema ? 1 + retries : 1;
 
 		/** @type {any} */
 		const baseParams = {
@@ -212,9 +213,12 @@ class Message extends BaseClaude {
 			// Validation + retry only on the fallback (Vertex prompt-paste) path.
 			if (!usesFallbackSchema) { validationErrors = null; break; }
 
-			validationErrors = (data === null)
-				? ['$: could not parse any JSON from the model response']
-				: (validateSchema(data, this._responseSchema).length ? validateSchema(data, this._responseSchema) : null);
+			if (data === null) {
+				validationErrors = ['$: could not parse any JSON from the model response'];
+			} else {
+				const errs = validateSchema(data, this._responseSchema);
+				validationErrors = errs.length ? errs : null;
+			}
 
 			if (!validationErrors) break; // valid — done
 
@@ -243,7 +247,8 @@ class Message extends BaseClaude {
 			promptTokens: cumPrompt,
 			responseTokens: cumResponse,
 			totalTokens: cumPrompt + cumResponse,
-			estimatedCost: computeCost(perCall.modelVersion || this.modelName, cumPrompt, cumResponse)
+			estimatedCost: computeCost(perCall.modelVersion, cumPrompt, cumResponse)
+				?? computeCost(this.modelName, cumPrompt, cumResponse)
 		};
 
 		/** @type {any} */

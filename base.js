@@ -53,15 +53,18 @@ const MODEL_PRICING = {
 function resolvePricing(modelId) {
 	if (!modelId) return null;
 	if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
+	// Vertex dated snapshots use an `@` separator, e.g. claude-opus-4-5@20250514.
+	// Try the hyphen-dated key first (some models have a dedicated dated price).
 	if (modelId.includes('@')) {
-		// Vertex dated snapshots use an `@` separator, e.g. claude-opus-4-5@20250514.
-		// Try the hyphen-dated key first (claude-opus-4-5-20250514), then the bare id
-		// (claude-sonnet-5) for current-gen models that only have a bare price entry.
 		const hyphenated = modelId.replace('@', '-');
 		if (MODEL_PRICING[hyphenated]) return MODEL_PRICING[hyphenated];
-		const bare = modelId.split('@')[0];
-		if (MODEL_PRICING[bare]) return MODEL_PRICING[bare];
 	}
+	// Strip a trailing dated snapshot (@YYYYMMDD or -YYYYMMDD) and retry the bare id
+	// — the direct API echoes hyphen-dated builds (claude-sonnet-4-6-20250514) even
+	// when the bare id (claude-sonnet-4-6) is the priced one. `\d{6,8}` avoids
+	// eating single-digit version parts like the `-6` in claude-sonnet-4-6.
+	const bare = modelId.replace(/[-@]\d{6,8}$/, '');
+	if (bare !== modelId && MODEL_PRICING[bare]) return MODEL_PRICING[bare];
 	return null;
 }
 
@@ -615,7 +618,8 @@ class BaseClaude {
 			requestedModel: meta.requestedModel,
 			stopReason: meta.stopReason,
 			timestamp: meta.timestamp,
-			estimatedCost: computeCost(meta.modelVersion || meta.requestedModel, promptTokens, responseTokens)
+			estimatedCost: computeCost(meta.modelVersion, promptTokens, responseTokens)
+				?? computeCost(meta.requestedModel, promptTokens, responseTokens)
 		};
 	}
 
@@ -645,7 +649,8 @@ class BaseClaude {
 			requestedModel: this.modelName,
 			stopReason: response?.stop_reason || null,
 			timestamp: Date.now(),
-			estimatedCost: computeCost(modelVersion || this.modelName, promptTokens, responseTokens)
+			estimatedCost: computeCost(modelVersion, promptTokens, responseTokens)
+				?? computeCost(this.modelName, promptTokens, responseTokens)
 		};
 	}
 

@@ -108,18 +108,42 @@ describe('consumer-fixes (ak-claude)', () => {
 			expect(r.usage.estimatedCost).toBeCloseTo(3.00 + 15.00, 5);
 		});
 
-		it('returns null estimatedCost for an unknown model', async () => {
-			const msg = new Message({ ...KEY });
+		it('returns null estimatedCost when neither modelVersion nor requestedModel is priced', async () => {
+			const msg = new Message({ ...KEY, modelName: 'claude-made-up' });
 			msg._initialized = true;
 			msg.client = { messages: { create: jest.fn(async () => textResponse('r', 100, 100, 'claude-made-up')) } };
 			const r = await msg.send('hi');
 			expect(r.usage.estimatedCost).toBeNull();
 		});
 
+		it('falls back to requestedModel pricing when modelVersion is unknown', async () => {
+			const msg = new Message({ ...KEY, modelName: 'claude-sonnet-4-6' });
+			msg._initialized = true;
+			msg.client = { messages: { create: jest.fn(async () => textResponse('r', 1_000_000, 0, 'weird-unpriced-build')) } };
+			const r = await msg.send('hi');
+			expect(r.usage.estimatedCost).toBeCloseTo(3.00, 5);
+		});
+
 		it('resolves Vertex dated snapshots to bare-id pricing', () => {
 			expect(resolvePricing('claude-opus-4-5@20250514')).toEqual(resolvePricing('claude-opus-4-5-20250514'));
 			expect(computeCost('claude-haiku-4-5@20251001', 1_000_000, 0)).toBeCloseTo(1.00, 5);
 			expect(resolvePricing('nope')).toBeNull();
+		});
+
+		it('resolves direct-API hyphen-dated builds to bare pricing', () => {
+			// API echoes a dated snapshot even when the bare id is the priced one
+			expect(resolvePricing('claude-sonnet-4-6-20250514')).toEqual(resolvePricing('claude-sonnet-4-6'));
+			expect(resolvePricing('claude-sonnet-5@20260101')).toEqual(resolvePricing('claude-sonnet-5'));
+			// single-digit version parts must NOT be stripped
+			expect(resolvePricing('claude-sonnet-4-6')).not.toBeNull();
+		});
+
+		it('estimatedCost is non-null when model carries a date suffix', async () => {
+			const msg = new Message({ ...KEY });
+			msg._initialized = true;
+			msg.client = { messages: { create: jest.fn(async () => textResponse('r', 1_000_000, 0, 'claude-sonnet-4-6-20250514')) } };
+			const r = await msg.send('hi');
+			expect(r.usage.estimatedCost).toBeCloseTo(3.00, 5);
 		});
 	});
 

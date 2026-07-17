@@ -408,9 +408,9 @@ function resolvePricing(modelId) {
   if (modelId.includes("@")) {
     const hyphenated = modelId.replace("@", "-");
     if (MODEL_PRICING[hyphenated]) return MODEL_PRICING[hyphenated];
-    const bare = modelId.split("@")[0];
-    if (MODEL_PRICING[bare]) return MODEL_PRICING[bare];
   }
+  const bare = modelId.replace(/[-@]\d{6,8}$/, "");
+  if (bare !== modelId && MODEL_PRICING[bare]) return MODEL_PRICING[bare];
   return null;
 }
 function computeCost(modelId, promptTokens, responseTokens) {
@@ -814,7 +814,7 @@ ${contextText}
       requestedModel: meta.requestedModel,
       stopReason: meta.stopReason,
       timestamp: meta.timestamp,
-      estimatedCost: computeCost(meta.modelVersion || meta.requestedModel, promptTokens, responseTokens)
+      estimatedCost: computeCost(meta.modelVersion, promptTokens, responseTokens) ?? computeCost(meta.requestedModel, promptTokens, responseTokens)
     };
   }
   /**
@@ -843,7 +843,7 @@ ${contextText}
       requestedModel: this.modelName,
       stopReason: response?.stop_reason || null,
       timestamp: Date.now(),
-      estimatedCost: computeCost(modelVersion || this.modelName, promptTokens, responseTokens)
+      estimatedCost: computeCost(modelVersion, promptTokens, responseTokens) ?? computeCost(this.modelName, promptTokens, responseTokens)
     };
   }
   // ── Token Estimation ────────────────────────────────────────────────────
@@ -1416,7 +1416,8 @@ var Message = class extends base_default {
       }
     }
     const usesFallbackSchema = !!(this._responseSchema && this.vertexai);
-    const maxAttempts = usesFallbackSchema ? 1 + Math.max(0, this.validationRetries) : 1;
+    const retries = Math.max(0, Number(this.validationRetries) || 0);
+    const maxAttempts = usesFallbackSchema ? 1 + retries : 1;
     const baseParams = {
       model: this.modelName,
       max_tokens: opts.maxTokens || this.maxTokens,
@@ -1482,7 +1483,12 @@ No markdown code blocks, no preamble text.`;
         validationErrors = null;
         break;
       }
-      validationErrors = data === null ? ["$: could not parse any JSON from the model response"] : validateSchema(data, this._responseSchema).length ? validateSchema(data, this._responseSchema) : null;
+      if (data === null) {
+        validationErrors = ["$: could not parse any JSON from the model response"];
+      } else {
+        const errs = validateSchema(data, this._responseSchema);
+        validationErrors = errs.length ? errs : null;
+      }
       if (!validationErrors) break;
       if (attempt < maxAttempts) {
         logger_default.warn(`Structured output failed schema validation (attempt ${attempt}/${maxAttempts}): ${validationErrors.join("; ")}. Retrying with error feedback.`);
@@ -1509,7 +1515,7 @@ Respond ONLY with corrected JSON that matches the schema. No markdown, no preamb
       promptTokens: cumPrompt,
       responseTokens: cumResponse,
       totalTokens: cumPrompt + cumResponse,
-      estimatedCost: computeCost(perCall.modelVersion || this.modelName, cumPrompt, cumResponse)
+      estimatedCost: computeCost(perCall.modelVersion, cumPrompt, cumResponse) ?? computeCost(this.modelName, cumPrompt, cumResponse)
     };
     const result = { text, usage };
     if (this._isStructured) result.data = data;
