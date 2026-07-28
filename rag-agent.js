@@ -216,6 +216,8 @@ class RagAgent extends BaseClaude {
 		this._cumulativeUsage = {
 			promptTokens: this.lastResponseMetadata.promptTokens,
 			responseTokens: this.lastResponseMetadata.responseTokens,
+			cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
+			cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
 			totalTokens: this.lastResponseMetadata.totalTokens,
 			attempts: 1
 		};

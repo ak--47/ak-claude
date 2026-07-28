@@ -33,13 +33,17 @@ try {
 
 	const tools = msg._buildTools();
 	const systemParam = msg._buildSystemParam();
-	const stream = msg.client.messages.stream({
+	/** @type {any} */
+	const params = {
 		model: msg.modelName,
 		max_tokens: msg.maxTokens,
 		messages: [{ role: 'user', content: prompt }],
 		...(systemParam && { system: systemParam }),
 		...(tools && { tools })
-	});
+	};
+	msg._applyThinkingParams(params);
+	msg._applySamplingParams(params);
+	const stream = msg.client.messages.stream(params);
 
 	stream.on('text', (delta) => process.stdout.write(delta));
 	await stream.finalMessage();

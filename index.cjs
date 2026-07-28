@@ -33,12 +33,15 @@ __export(index_exports, {
   BaseClaude: () => base_default,
   Chat: () => chat_default,
   CodeAgent: () => code_agent_default,
+  EFFORT_LEVELS: () => EFFORT_LEVELS,
   MODEL_PRICING: () => MODEL_PRICING,
+  MODEL_PRICING_AS_OF: () => MODEL_PRICING_AS_OF,
   Message: () => message_default,
   RagAgent: () => rag_agent_default,
   ToolAgent: () => tool_agent_default,
   Transformer: () => transformer_default,
   attemptJSONRecovery: () => attemptJSONRecovery,
+  budgetTokensToEffort: () => budgetTokensToEffort,
   computeCost: () => computeCost,
   default: () => index_default,
   extractJSON: () => extractJSON,
@@ -388,11 +391,18 @@ function extractJSON(text) {
 import_dotenv.default.config({ quiet: true });
 var { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
 var DEFAULT_MAX_TOKENS = 8192;
+var MODEL_PRICING_AS_OF = "2026-07-28";
 var MODEL_PRICING = {
   // Claude 5 family
   "claude-fable-5": { input: 10, output: 50 },
-  "claude-sonnet-5": { input: 3, output: 15 },
-  // intro pricing ($2/$10) through 2026-08-31 not modelled
+  "claude-mythos-5": { input: 10, output: 50 },
+  // Project Glasswing only
+  "claude-opus-5": { input: 5, output: 25 },
+  "claude-sonnet-5": {
+    input: 3,
+    output: 15,
+    intro: { input: 2, output: 10, until: "2026-08-31" }
+  },
   // Opus 4.x
   "claude-opus-4-8": { input: 5, output: 25 },
   "claude-opus-4-7": { input: 5, output: 25 },
@@ -407,7 +417,24 @@ var MODEL_PRICING = {
   "claude-haiku-4-5": { input: 1, output: 5 },
   "claude-haiku-4-5-20251001": { input: 1, output: 5 }
 };
-function resolvePricing(modelId) {
+function _applyIntroPricing(entry, at) {
+  if (!entry?.intro) return entry;
+  const now = at === void 0 ? /* @__PURE__ */ new Date() : new Date(at);
+  const until = /* @__PURE__ */ new Date(`${entry.intro.until}T23:59:59.999Z`);
+  if (Number.isNaN(now.getTime()) || now > until) return entry;
+  return {
+    ...entry,
+    input: entry.intro.input,
+    output: entry.intro.output,
+    introUntil: entry.intro.until
+  };
+}
+function resolvePricing(modelId, opts = {}) {
+  const entry = _lookupPricing(modelId);
+  if (!entry) return null;
+  return { ..._applyIntroPricing(entry, opts.at), asOf: MODEL_PRICING_AS_OF };
+}
+function _lookupPricing(modelId) {
   if (!modelId) return null;
   if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
   if (modelId.includes("@")) {
@@ -419,14 +446,27 @@ function resolvePricing(modelId) {
   return null;
 }
 var CACHE_WRITE_MULTIPLIER = 1.25;
+var CACHE_WRITE_MULTIPLIER_1H = 2;
 var CACHE_READ_MULTIPLIER = 0.1;
-function computeCost(modelId, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
-  const pricing = resolvePricing(modelId);
+function computeCost(modelId, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0, opts = {}) {
+  const pricing = resolvePricing(modelId, { at: opts.at });
   if (!pricing) return null;
-  return promptTokens / 1e6 * pricing.input + responseTokens / 1e6 * pricing.output + cacheCreationTokens / 1e6 * pricing.input * CACHE_WRITE_MULTIPLIER + cacheReadTokens / 1e6 * pricing.input * CACHE_READ_MULTIPLIER;
+  const writeMultiplier = opts.cacheTtl === "1h" ? CACHE_WRITE_MULTIPLIER_1H : CACHE_WRITE_MULTIPLIER;
+  return promptTokens / 1e6 * pricing.input + responseTokens / 1e6 * pricing.output + cacheCreationTokens / 1e6 * pricing.input * writeMultiplier + cacheReadTokens / 1e6 * pricing.input * CACHE_READ_MULTIPLIER;
 }
 var GLOBAL_OR_MULTIREGION = /* @__PURE__ */ new Set(["global", "us", "eu"]);
-var CLAUDE5_FAMILY_REGEX = /^claude-(sonnet-5|opus-4-[78]|fable-5|mythos)/;
+var CLAUDE5_FAMILY_REGEX = /^claude-(opus|sonnet|haiku)-5|^claude-opus-4-[78]|^claude-(fable-5|mythos)/;
+var CLAUDE46_FAMILY_REGEX = /^claude-(opus|sonnet)-4-6/;
+var EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+var EFFORT_LEVELS_4_6 = ["low", "medium", "high", "max"];
+function budgetTokensToEffort(budgetTokens) {
+  const n = Number(budgetTokens) || 0;
+  if (n <= 0) return null;
+  if (n <= 2048) return "low";
+  if (n <= 8192) return "medium";
+  if (n <= 24576) return "high";
+  return "xhigh";
+}
 var BaseClaude = class {
   /**
    * @param {BaseClaudeOptions} [options={}]
@@ -450,11 +490,14 @@ var BaseClaude = class {
       this.apiKey = null;
     }
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
-    this.temperature = options.temperature ?? 0.7;
-    this.topP = options.topP ?? (this.vertexai ? void 0 : 0.95);
-    this.topK = options.topK ?? void 0;
+    this.temperature = options.temperature === null ? void 0 : options.temperature ?? 0.7;
+    this.topP = options.topP === null ? void 0 : options.topP ?? (this.vertexai ? void 0 : 0.95);
+    this.topK = options.topK === null ? void 0 : options.topK ?? void 0;
     this.thinking = options.thinking ?? null;
+    this.effort = this._normalizeEffort(options.effort);
+    this.adaptiveThinking = options.adaptiveThinking ?? false;
     this.cacheSystemPrompt = options.cacheSystemPrompt ?? false;
+    this.cacheTtl = options.cacheTtl === "1h" ? "1h" : "5m";
     this.enableWebSearch = options.enableWebSearch ?? false;
     this.webSearchConfig = options.webSearchConfig ?? {};
     this.healthCheck = options.healthCheck ?? false;
@@ -486,6 +529,8 @@ var BaseClaude = class {
     this._cumulativeUsage = {
       promptTokens: 0,
       responseTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
       totalTokens: 0,
       attempts: 0
     };
@@ -536,6 +581,31 @@ var BaseClaude = class {
       }
     }
   }
+  /**
+   * Wraps an API call so provider-specific failures surface as actionable errors
+   * instead of raw SDK noise. Currently: the Vertex 403 you get when a publisher
+   * model requires data sharing to be enabled for the project.
+   * @param {() => Promise<T>} fn
+   * @param {string} [modelName]
+   * @returns {Promise<T>}
+   * @template T
+   * @protected
+   */
+  async _callWithVertexHints(fn, modelName = this.modelName) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (this.vertexai && (e?.status === 403 || /permission|403/i.test(e?.message || ""))) {
+        throw new Error(
+          `Vertex AI denied access to "${modelName}" (403). Some Anthropic publisher models require publisher data sharing to be enabled for your project before Vertex will serve them. Enable it for this model with:
+  gcloud beta services vertex-ai publisher-models set-publisher-model-config anthropic/${modelName} --project=${this.vertexProjectId} --location=${this.vertexRegion} --publisher-model-config-from-file=<config>
+(or via the Model Garden UI \u2192 the model card \u2192 "Enable"). Original error: ${e?.message || e}`,
+          { cause: e }
+        );
+      }
+      throw e;
+    }
+  }
   // ── Initialization ───────────────────────────────────────────────────────
   /**
    * Initializes the instance. Idempotent unless force=true.
@@ -581,7 +651,8 @@ var BaseClaude = class {
   _buildSystemParam() {
     if (!this.systemPrompt) return void 0;
     if (this.cacheSystemPrompt) {
-      return [{ type: "text", text: this.systemPrompt, cache_control: { type: "ephemeral" } }];
+      const cacheControl = this.cacheTtl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+      return [{ type: "text", text: this.systemPrompt, cache_control: cacheControl }];
     }
     return this.systemPrompt;
   }
@@ -602,6 +673,162 @@ var BaseClaude = class {
     if (!tools || tools.length === 0) return [webSearchTool];
     return [webSearchTool, ...tools];
   }
+  // ── Request Param Builders ───────────────────────────────────────────────
+  /**
+   * Validates an `effort` option. Throws on an unknown level so a typo surfaces
+   * at construction rather than as an API 400.
+   * @param {string|null|undefined} effort
+   * @returns {'low'|'medium'|'high'|'xhigh'|'max'|null}
+   * @private
+   */
+  _normalizeEffort(effort) {
+    if (effort === void 0 || effort === null) return null;
+    const level = String(effort).toLowerCase();
+    if (!EFFORT_LEVELS.includes(level)) {
+      throw new Error(`Invalid effort "${effort}". Expected one of: ${EFFORT_LEVELS.join(", ")}.`);
+    }
+    return (
+      /** @type {any} */
+      level
+    );
+  }
+  /**
+   * True when the target model rejects temperature/top_p/top_k and
+   * thinking.budget_tokens (the Claude 5 family).
+   * @param {string} [modelName]
+   * @returns {boolean}
+   * @protected
+   */
+  _isClaude5Family(modelName = this.modelName) {
+    return CLAUDE5_FAMILY_REGEX.test(modelName || "");
+  }
+  /**
+   * Applies temperature / top_p / top_k to a request params object, in place.
+   *
+   * Skipped entirely when:
+   *  - the model is Claude 5-family (these params 400 there), or
+   *  - extended thinking is active (temperature is forced to 1 and top_p/top_k
+   *    are unsupported).
+   *
+   * @param {any} params - Request params, mutated in place.
+   * @param {string} [modelName] - Target model (defaults to this.modelName).
+   * @returns {any} The same params object.
+   * @protected
+   */
+  _applySamplingParams(params, modelName = this.modelName) {
+    if (this._isClaude5Family(modelName)) {
+      const dropped = [
+        this.temperature !== void 0 && "temperature",
+        this.topP !== void 0 && "top_p",
+        this.topK !== void 0 && "top_k"
+      ].filter(Boolean);
+      if (dropped.length) {
+        logger_default.debug(`Model "${modelName}" rejects sampling params \u2014 dropping ${dropped.join(", ")}. Use \`effort\` to control reasoning depth instead.`);
+      }
+      return params;
+    }
+    if (this._resolveThinking(modelName)) return params;
+    if (this.vertexai && this.temperature !== void 0 && this.topP !== void 0) {
+      params.temperature = this.temperature;
+      logger_default.debug("Vertex AI: Using temperature only (topP ignored)");
+    } else {
+      if (this.temperature !== void 0) params.temperature = this.temperature;
+      if (this.topP !== void 0) params.top_p = this.topP;
+    }
+    if (this.topK !== void 0) params.top_k = this.topK;
+    return params;
+  }
+  /**
+   * Resolves the thinking config to send for a model, translating the legacy
+   * `{ type: 'enabled', budget_tokens }` shape where required.
+   *
+   * Resolution order:
+   *  1. `effort` set                    → adaptive thinking at that effort
+   *  2. `thinking: { type: 'adaptive' }` → forwarded as-is
+   *  3. legacy `budget_tokens`           → translated to adaptive on models that
+   *     reject it (Claude 5 family always; 4.6 family only with adaptiveThinking)
+   *  4. otherwise                        → forwarded unchanged
+   *
+   * @param {string} [modelName]
+   * @returns {{ thinking: any, effort: string|null }|null} null when no thinking should be sent.
+   * @protected
+   */
+  _resolveThinking(modelName = this.modelName) {
+    const isClaude5 = this._isClaude5Family(modelName);
+    const is46 = CLAUDE46_FAMILY_REGEX.test(modelName || "");
+    const supportsAdaptive = isClaude5 || is46;
+    const thinking = this.thinking;
+    const display = thinking?.display;
+    if (this.effort) {
+      if (!supportsAdaptive) {
+        logger_default.warn(`Model "${modelName}" does not support adaptive thinking \u2014 ignoring effort: '${this.effort}'. Use thinking: { type: 'enabled', budget_tokens: N } instead.`);
+        return thinking ? { thinking, effort: null } : null;
+      }
+      return {
+        thinking: { type: "adaptive", ...display && { display } },
+        effort: this._clampEffort(this.effort, is46, modelName)
+      };
+    }
+    if (!thinking) return null;
+    if (thinking.type === "adaptive") {
+      if (!supportsAdaptive) {
+        logger_default.warn(`Model "${modelName}" does not support adaptive thinking. Sending it anyway \u2014 the API may reject the request.`);
+      }
+      return { thinking, effort: null };
+    }
+    if (thinking.type === "enabled") {
+      const mustTranslate = isClaude5 || is46 && this.adaptiveThinking;
+      if (!mustTranslate) return { thinking, effort: null };
+      const effort = budgetTokensToEffort(thinking.budget_tokens);
+      if (!effort) {
+        logger_default.debug(`thinking.budget_tokens=${thinking.budget_tokens} on "${modelName}" \u2014 omitting thinking entirely.`);
+        return null;
+      }
+      logger_default.debug(`Model "${modelName}" rejects thinking.budget_tokens \u2014 translating budget_tokens=${thinking.budget_tokens} to adaptive thinking at effort '${effort}'.`);
+      return {
+        thinking: { type: "adaptive", ...display && { display } },
+        effort: this._clampEffort(effort, is46, modelName)
+      };
+    }
+    return { thinking, effort: null };
+  }
+  /**
+   * Clamps an effort level to what the target model supports.
+   * `xhigh` is not a valid level on Opus 4.6 / Sonnet 4.6.
+   * @param {string} effort
+   * @param {boolean} is46
+   * @param {string} modelName
+   * @returns {string}
+   * @private
+   */
+  _clampEffort(effort, is46, modelName) {
+    if (is46 && !EFFORT_LEVELS_4_6.includes(effort)) {
+      logger_default.warn(`Effort '${effort}' is not supported on "${modelName}" (valid: ${EFFORT_LEVELS_4_6.join(", ")}). Clamping to 'high'.`);
+      return "high";
+    }
+    return effort;
+  }
+  /**
+   * Applies `thinking` and `output_config.effort` to a request params object, in place.
+   *
+   * MERGES into any pre-existing `params.output_config` — Message writes
+   * `output_config.format` for native structured output, and overwriting it
+   * would silently break `responseSchema`.
+   *
+   * @param {any} params - Request params, mutated in place.
+   * @param {string} [modelName] - Target model (defaults to this.modelName).
+   * @returns {any} The same params object.
+   * @protected
+   */
+  _applyThinkingParams(params, modelName = this.modelName) {
+    const resolved = this._resolveThinking(modelName);
+    if (!resolved) return params;
+    params.thinking = resolved.thinking;
+    if (resolved.effort) {
+      params.output_config = { ...params.output_config || {}, effort: resolved.effort };
+    }
+    return params;
+  }
   /**
    * Core method: sends a message via messages.create(), manages history.
    * Handles both string content and content block arrays (for tool_result).
@@ -616,27 +843,18 @@ var BaseClaude = class {
     const userMsg = { role: "user", content: userContent };
     this.history.push(userMsg);
     const tools = this._buildTools(opts.tools);
+    const model = opts.model || this.modelName;
     const params = {
-      model: opts.model || this.modelName,
+      model,
       max_tokens: opts.maxTokens || this.maxTokens,
       messages: [...this.history],
       ...this._buildSystemParam() && { system: this._buildSystemParam() },
-      ...this.topK !== void 0 && { top_k: this.topK },
       ...tools && { tools },
       ...opts.tool_choice && { tool_choice: opts.tool_choice }
     };
-    if (this.thinking) {
-      params.thinking = this.thinking;
-    } else {
-      if (this.vertexai && this.temperature !== void 0 && this.topP !== void 0) {
-        params.temperature = this.temperature;
-        logger_default.debug("Vertex AI: Using temperature only (topP ignored)");
-      } else {
-        if (this.temperature !== void 0) params.temperature = this.temperature;
-        if (this.topP !== void 0) params.top_p = this.topP;
-      }
-    }
-    const response = await this.client.messages.create(params);
+    this._applyThinkingParams(params, model);
+    this._applySamplingParams(params, model);
+    const response = await this._callWithVertexHints(() => this.client.messages.create(params), model);
     this.history.push({ role: "assistant", content: response.content });
     this._captureMetadata(response);
     return response;
@@ -654,26 +872,17 @@ var BaseClaude = class {
     const userMsg = { role: "user", content: userContent };
     this.history.push(userMsg);
     const tools = this._buildTools(opts.tools);
+    const model = opts.model || this.modelName;
     const params = {
-      model: opts.model || this.modelName,
+      model,
       max_tokens: opts.maxTokens || this.maxTokens,
       messages: [...this.history],
       ...this._buildSystemParam() && { system: this._buildSystemParam() },
-      ...this.topK !== void 0 && { top_k: this.topK },
       ...tools && { tools },
       ...opts.tool_choice && { tool_choice: opts.tool_choice }
     };
-    if (this.thinking) {
-      params.thinking = this.thinking;
-    } else {
-      if (this.vertexai && this.temperature !== void 0 && this.topP !== void 0) {
-        params.temperature = this.temperature;
-        logger_default.debug("Vertex AI: Using temperature only (topP ignored)");
-      } else {
-        if (this.temperature !== void 0) params.temperature = this.temperature;
-        if (this.topP !== void 0) params.top_p = this.topP;
-      }
-    }
+    this._applyThinkingParams(params, model);
+    this._applySamplingParams(params, model);
     const stream = this.client.messages.stream(params);
     return stream;
   }
@@ -712,7 +921,7 @@ var BaseClaude = class {
   async clearHistory() {
     this.history = [];
     this.lastResponseMetadata = null;
-    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
     logger_default.debug(`${this.constructor.name}: Conversation history cleared.`);
   }
   // ── Few-Shot Seeding ─────────────────────────────────────────────────────
@@ -814,7 +1023,7 @@ ${contextText}
   getLastUsage() {
     if (!this.lastResponseMetadata) return null;
     const meta = this.lastResponseMetadata;
-    const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
+    const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 1 };
     const useCumulative = cumulative.attempts > 0;
     const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
     const responseTokens = useCumulative ? cumulative.responseTokens : meta.responseTokens;
@@ -847,7 +1056,11 @@ ${contextText}
    * @protected
    */
   _estimatedCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
-    return computeCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens) ?? computeCost(this.modelName, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens);
+    const opts = { cacheTtl: (
+      /** @type {'5m'|'1h'} */
+      this.cacheTtl
+    ) };
+    return computeCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens, opts) ?? computeCost(this.modelName, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens, opts);
   }
   /**
    * Builds a usage object directly from a single API response, WITHOUT reading
@@ -1115,7 +1328,7 @@ var Transformer = class extends base_default {
     const maxRetries = opts.maxRetries ?? this.validationRetries;
     const retryDelay = opts.retryDelay ?? this.retryDelay;
     let lastPayload = this._preparePayload(payload);
-    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
     let lastError = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -1123,6 +1336,8 @@ var Transformer = class extends base_default {
         if (this.lastResponseMetadata) {
           this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
           this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
+          this._cumulativeUsage.cacheCreationTokens += this.lastResponseMetadata.cacheCreationTokens || 0;
+          this._cumulativeUsage.cacheReadTokens += this.lastResponseMetadata.cacheReadTokens || 0;
           this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
           this._cumulativeUsage.attempts = attempt + 1;
         }
@@ -1234,17 +1449,15 @@ Respond with JSON only \u2013 no comments or explanations.
       messages,
       ...this._buildSystemParam() && { system: this._buildSystemParam() }
     };
-    if (this.thinking) {
-      params.thinking = this.thinking;
-    } else {
-      if (this.temperature !== void 0) params.temperature = this.temperature;
-      if (this.topP !== void 0) params.top_p = this.topP;
-    }
-    const response = await this.client.messages.create(params);
+    this._applyThinkingParams(params);
+    this._applySamplingParams(params);
+    const response = await this._callWithVertexHints(() => this.client.messages.create(params));
     this._captureMetadata(response);
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
+      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -1265,7 +1478,7 @@ Respond with JSON only \u2013 no comments or explanations.
     const exampleHistory = this.history.slice(0, this.exampleCount || 0);
     this.history = exampleHistory;
     this.lastResponseMetadata = null;
-    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
     logger_default.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
   }
   /**
@@ -1276,7 +1489,7 @@ Respond with JSON only \u2013 no comments or explanations.
     this.history = [];
     this.exampleCount = 0;
     this.lastResponseMetadata = null;
-    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+    this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
     logger_default.debug("Conversation fully reset.");
   }
   /**
@@ -1351,6 +1564,8 @@ var Chat = class extends base_default {
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
+      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -1471,15 +1686,8 @@ No markdown code blocks, no preamble text.` : "";
         baseParams.system = schemaInstruction.trim();
       }
     }
-    if (this.thinking) {
-      baseParams.thinking = this.thinking;
-    } else if (this.vertexai && this.temperature !== void 0 && this.topP !== void 0) {
-      baseParams.temperature = this.temperature;
-      logger_default.debug("Vertex AI: Using temperature only (topP ignored)");
-    } else {
-      if (this.temperature !== void 0) baseParams.temperature = this.temperature;
-      if (this.topP !== void 0) baseParams.top_p = this.topP;
-    }
+    this._applyThinkingParams(baseParams);
+    this._applySamplingParams(baseParams);
     let userContent = payloadStr;
     let text = "";
     let data;
@@ -1491,7 +1699,7 @@ No markdown code blocks, no preamble text.` : "";
         /** @type {'user'} */
         "user"
       ), content: userContent }] };
-      const response = await this.client.messages.create(params);
+      const response = await this._callWithVertexHints(() => this.client.messages.create(params));
       lastResponse = response;
       attempts = attempt;
       cumPrompt += response?.usage?.input_tokens || 0;
@@ -1599,11 +1807,17 @@ var ToolAgent = class extends base_default {
       options = { ...options, systemPrompt: "You are a helpful AI assistant." };
     }
     super(options);
-    this.tools = (options.tools || []).map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.input_schema || t.inputSchema || t.parametersJsonSchema
-    }));
+    this.tools = (options.tools || []).map((t, i) => {
+      const schema = t.input_schema || t.inputSchema || t.parametersJsonSchema;
+      if (!schema) {
+        throw new Error(`ToolAgent: tool ${t?.name ? `"${t.name}"` : `at index ${i}`} has no parameter schema. Provide one of: input_schema (Claude), inputSchema, or parametersJsonSchema (Gemini). For a no-argument tool use { type: 'object', properties: {} }.`);
+      }
+      return {
+        name: t.name,
+        description: t.description,
+        input_schema: schema
+      };
+    });
     this.toolExecutor = options.toolExecutor || null;
     if (this.tools.length > 0 && !this.toolExecutor) {
       throw new Error("ToolAgent: tools provided without a toolExecutor. Provide a toolExecutor function to handle tool calls.");
@@ -1695,6 +1909,8 @@ var ToolAgent = class extends base_default {
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
+      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -2695,6 +2911,8 @@ ${this.envOverview}`;
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
+      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -3016,6 +3234,8 @@ ${serialized}` });
     this._cumulativeUsage = {
       promptTokens: this.lastResponseMetadata.promptTokens,
       responseTokens: this.lastResponseMetadata.responseTokens,
+      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
+      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
@@ -3226,12 +3446,15 @@ var index_default = { Transformer: transformer_default, Chat: chat_default, Mess
   BaseClaude,
   Chat,
   CodeAgent,
+  EFFORT_LEVELS,
   MODEL_PRICING,
+  MODEL_PRICING_AS_OF,
   Message,
   RagAgent,
   ToolAgent,
   Transformer,
   attemptJSONRecovery,
+  budgetTokensToEffort,
   computeCost,
   extractJSON,
   log,

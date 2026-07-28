@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-claude** (v0.0.1) is a modular wrapper around Anthropic's `@anthropic-ai/sdk`. It provides 7 class exports for different AI interaction patterns (6 extending a shared `BaseClaude` base class) plus a standalone `AgentQuery` class that wraps the Claude Agent SDK.
+**ak-claude** (v0.2.0) is a modular wrapper around Anthropic's `@anthropic-ai/sdk`. It provides 7 class exports for different AI interaction patterns (6 extending a shared `BaseClaude` base class) plus a standalone `AgentQuery` class that wraps the Claude Agent SDK.
 
 ## Architecture
 
@@ -64,7 +64,9 @@ All classes except `AgentQuery` extend `BaseClaude` which provides: auth, client
 - **`toolChoice`** — Supports Claude's tool choice types: `auto`, `any`, `tool` (with `name`), `none`, plus `disableParallelToolUse` flag
 - **Citations** — RagAgent supports Claude's native citations feature via `enableCitations`, which wraps documents in `{ type: 'document', citations: { enabled: true } }` content blocks
 - **Native structured output** — Message class supports `responseSchema` which uses Claude's `output_config.format.json_schema` for guaranteed valid JSON, with fallback to system prompt hacking via `responseFormat: 'json'`
-- **Extended thinking** — `thinking: { type: 'enabled', budget_tokens: N }` enables Claude's thinking mode; when active, temperature must be 1 and top_p/top_k are not sent
+- **Extended thinking** — current API is `thinking: { type: 'adaptive' }` + `output_config: { effort }`, driven by the `effort` option (`low`/`medium`/`high`/`xhigh`/`max`). The legacy `thinking: { type: 'enabled', budget_tokens: N }` shape is translated automatically on the Claude 5 family (which 400s on it) and passes through unchanged on 4.6 unless `adaptiveThinking: true`. `xhigh` clamps to `high` on the 4.6 family. When thinking is active, temperature/top_p/top_k are not sent
+- **Claude 5 family param gating** — Fable 5, Mythos 5, Opus 5, Opus 4.8, Opus 4.7, and Sonnet 5 reject `temperature`/`top_p`/`top_k` with a 400. `CLAUDE5_FAMILY_REGEX` in [base.js](base.js) gates them off. **When adding a model id to `MODEL_PRICING`, check whether the regex also needs to match it** — a miss means silent 400s
+- **Two shared param builders** — `_applySamplingParams(params, model)` and `_applyThinkingParams(params, model)` on `BaseClaude` are the ONLY places sampling/thinking params are constructed. Five call sites use them: `_sendMessage`, `_streamMessage`, `Message.send`, `Transformer._statelessSend`, `cli.js`. Do not inline a sixth. `_applyThinkingParams` **merges** into `params.output_config` — `Message` writes `output_config.format` there for native structured output, so order matters (format first, then the helpers)
 - Default export is a namespace object: `{ Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, AgentQuery }`
 
 ## Key Classes & APIs
@@ -195,7 +197,7 @@ new Transformer(); // auto-detects from env
 // Named exports
 import { Transformer, Chat, Message, ToolAgent, CodeAgent, RagAgent, AgentQuery, BaseClaude, log } from 'ak-claude';
 import { extractJSON, attemptJSONRecovery, validateSchema } from 'ak-claude';
-import { MODEL_PRICING, resolvePricing, computeCost } from 'ak-claude';
+import { MODEL_PRICING, MODEL_PRICING_AS_OF, EFFORT_LEVELS, resolvePricing, computeCost, budgetTokensToEffort } from 'ak-claude';
 
 // Default export (namespace object)
 import AI from 'ak-claude';
@@ -425,7 +427,11 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 - `estimate()` — INPUT token counts before sending, via `messages.countTokens()` API
 - `getLastUsage()` — actual consumption AFTER the call (includes `cacheCreationTokens`, `cacheReadTokens`)
 - `estimateCost()` — cost estimate using `MODEL_PRICING` table in `base.js`
-- MODEL_PRICING covers: claude-sonnet-4-6, claude-haiku-4-5, claude-opus-4-6 (and dated variants)
+- MODEL_PRICING covers the Claude 5 family (fable/mythos/opus-5/sonnet-5/opus-4-8/opus-4-7), 4.6, 4.5, and Haiku 4.5 (plus dated variants). `MODEL_PRICING_AS_OF` records when the table was last verified
+- **`null` cost means UNKNOWN, not free.** `resolvePricing()` / `usage.estimatedCost` return `null` for unpriced models
+- Sonnet 5 bills at an introductory $2/$10 per M through 2026-08-31, then $3/$15 — modelled as an `intro` block on the table entry. `resolvePricing(id, { at })` / `computeCost(..., { at })` accept an explicit date
+- Anthropic **excludes** cache tokens from `input_tokens` — they are billed on top (write 1.25× input at 5m TTL, **2× at 1h** via `cacheTtl: '1h'`; read 0.1×). ak-gemini is the opposite (its `promptTokenCount` includes cached tokens and they are subtracted). Do not "unify" the two
+- **Sonnet 5's tokenizer produces ~30% more tokens than Sonnet 4.6** for the same text. `estimate()` uses `countTokens()` and stays accurate; local character heuristics do not
 
 ### Web Search (BaseClaude)
 - `enableWebSearch: true` + `webSearchConfig: {}` on any class constructor
@@ -435,6 +441,7 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 
 ### Prompt Caching (BaseClaude)
 - `cacheSystemPrompt: true` wraps system prompt in `cache_control: { type: 'ephemeral' }` block
+- `cacheTtl: '1h'` adds `ttl: '1h'` to that block and switches the cost model to the 2× write multiplier (default `'5m'` = 1.25×)
 - Cache token metrics available in `getLastUsage()`: `cacheCreationTokens`, `cacheReadTokens`
 - No explicit cache CRUD (unlike Gemini) — Anthropic manages cache lifecycle server-side
 
