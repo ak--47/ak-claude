@@ -171,7 +171,7 @@ class Transformer extends BaseClaude {
 		let lastPayload = this._preparePayload(payload);
 
 		// Reset cumulative usage tracking
-		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
 
 		let lastError = null;
 
@@ -185,6 +185,8 @@ class Transformer extends BaseClaude {
 				if (this.lastResponseMetadata) {
 					this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
 					this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
+					this._cumulativeUsage.cacheCreationTokens += this.lastResponseMetadata.cacheCreationTokens || 0;
+					this._cumulativeUsage.cacheReadTokens += this.lastResponseMetadata.cacheReadTokens || 0;
 					this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
 					this._cumulativeUsage.attempts = attempt + 1;
 				}
@@ -331,19 +333,17 @@ Respond with JSON only – no comments or explanations.
 			...(this._buildSystemParam() && { system: this._buildSystemParam() }),
 		};
 
-		if (this.thinking) {
-			params.thinking = this.thinking;
-		} else {
-			if (this.temperature !== undefined) params.temperature = this.temperature;
-			if (this.topP !== undefined) params.top_p = this.topP;
-		}
+		this._applyThinkingParams(params);
+		this._applySamplingParams(params);
 
-		const response = await this.client.messages.create(params);
+		const response = await this._callWithVertexHints(() => this.client.messages.create(params));
 		this._captureMetadata(response);
 
 		this._cumulativeUsage = {
 			promptTokens: this.lastResponseMetadata.promptTokens,
 			responseTokens: this.lastResponseMetadata.responseTokens,
+			cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
+			cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
 			totalTokens: this.lastResponseMetadata.totalTokens,
 			attempts: 1
 		};
@@ -369,7 +369,7 @@ Respond with JSON only – no comments or explanations.
 		const exampleHistory = this.history.slice(0, this.exampleCount || 0);
 		this.history = exampleHistory;
 		this.lastResponseMetadata = null;
-		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
 		log.debug(`Conversation cleared. Preserved ${exampleHistory.length} example items.`);
 	}
 
@@ -381,7 +381,7 @@ Respond with JSON only – no comments or explanations.
 		this.history = [];
 		this.exampleCount = 0;
 		this.lastResponseMetadata = null;
-		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
 		log.debug("Conversation fully reset.");
 	}
 

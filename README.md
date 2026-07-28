@@ -414,6 +414,8 @@ new Chat({ apiKey: 'your-key' }); // or ANTHROPIC_API_KEY / CLAUDE_API_KEY env v
 
 **Note:** Vertex AI doesn't allow both `temperature` and `topP` to be specified together. When using Vertex AI, the module automatically uses only `temperature` if both are set, and `topP` is not sent to the API. The default for Vertex AI is `temperature: 0.7` (no `topP`).
 
+**Claude 5 family:** Fable 5, Mythos 5, Opus 5, Opus 4.8, Opus 4.7, and Sonnet 5 reject `temperature`, `top_p`, and `top_k` with a 400. ak-claude drops all three for those models automatically (logged at debug). Set `temperature: null` (or `topP`/`topK`) to suppress a param on any model — `null` means "never send", `undefined` means "use the default".
+
 ### Token Estimation
 
 Uses Claude's `countTokens` API for exact input token counts before sending.
@@ -429,8 +431,25 @@ const cost = await instance.estimateCost({ some: 'payload' });
 ```javascript
 const usage = instance.getLastUsage();
 // { promptTokens, responseTokens, totalTokens, cacheCreationTokens, cacheReadTokens,
-//   attempts, modelVersion, requestedModel, stopReason, timestamp }
+//   attempts, modelVersion, requestedModel, stopReason, timestamp, estimatedCost }
 ```
+
+`estimatedCost` is USD from `MODEL_PRICING`. **`null` means the model's pricing is
+unknown — not that the call was free.**
+
+Anthropic **excludes** cache tokens from `input_tokens`, so cache-write and
+cache-read tokens are billed *on top* of `promptTokens` (write 1.25× input at the
+default 5m TTL, 2× at 1h; read 0.1× input). This is the opposite of `ak-gemini`,
+where `promptTokenCount` *includes* cached tokens and they are subtracted.
+
+`resolvePricing(id, { at })` and `computeCost(..., { at, cacheTtl })` accept an
+explicit date, which matters for Sonnet 5: it bills at an introductory $2/$10 per
+M through 2026-08-31, then $3/$15.
+
+> **Sonnet 5 tokenizer:** Sonnet 5 produces roughly **30% more tokens than
+> Sonnet 4.6 for the same text**. Re-check cost projections, `maxTokens` sizing,
+> and any upstream chunker when migrating. `estimate()` calls `countTokens()` and
+> stays accurate; local character-count heuristics do not.
 
 ### Few-Shot Seeding
 
@@ -442,14 +461,45 @@ await instance.seed([
 
 ### Extended Thinking
 
+The current API is adaptive thinking plus an effort level. Use `effort` — it is the
+same option name in `ak-gemini`:
+
 ```javascript
 new Chat({
-  modelName: 'claude-sonnet-4-6',
-  thinking: { type: 'enabled', budget_tokens: 1024 }
+  modelName: 'claude-sonnet-5',
+  effort: 'high'          // 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 });
+// wire: thinking: { type: 'adaptive' }, output_config: { effort: 'high' }
 ```
 
-When thinking is enabled, `temperature` is forced to 1 and `top_p`/`top_k` are not sent (Anthropic API requirement).
+`xhigh` is not valid on Opus 4.6 / Sonnet 4.6 and clamps to `high` with a warning.
+
+The legacy shape still works and is **translated automatically** on the Claude 5
+family, which 400s on `budget_tokens`:
+
+```javascript
+new Chat({ modelName: 'claude-sonnet-5', thinking: { type: 'enabled', budget_tokens: 4096 } });
+// → thinking: { type: 'adaptive' }, output_config: { effort: 'medium' }
+```
+
+| `budget_tokens` | effort |
+|---|---|
+| `0` / falsy | thinking omitted entirely |
+| 1–2048 | `low` |
+| 2049–8192 | `medium` |
+| 8193–24576 | `high` |
+| > 24576 | `xhigh` |
+
+Opus 4.6 / Sonnet 4.6 keep the legacy `budget_tokens` shape by default. Pass
+`adaptiveThinking: true` to translate there too — this is what silences
+Anthropic's `budget_tokens` deprecation warning. The default flips in the next
+major.
+
+`thinking.display` (`'omitted'` is the default on the 5 family, `'summarized'`
+opt-in) passes through verbatim on both paths.
+
+When thinking is active, `temperature`, `top_p`, and `top_k` are not sent
+(Anthropic API requirement).
 
 ### Web Search
 
@@ -518,11 +568,14 @@ All classes (except AgentQuery) accept `BaseClaudeOptions`:
 | `vertexProjectId` | string | `GOOGLE_CLOUD_PROJECT` | GCP project ID (Vertex AI only) |
 | `vertexRegion` | string | `'global'` | GCP region (Vertex AI only). `'global'`/`'us'`/`'eu'` serve Claude 5-family models; specific regions (e.g. `us-east5`) serve Sonnet 4.6 and earlier |
 | `maxTokens` | number | `8192` | Max tokens in response |
-| `temperature` | number | `0.7` | Temperature (not used with thinking) |
-| `topP` | number | `0.95` | Top-P (not used with thinking) |
-| `topK` | number | — | Top-K (optional) |
-| `thinking` | object | — | Extended thinking: `{ type: 'enabled', budget_tokens: N }` |
+| `temperature` | number \| null | `0.7` | Temperature. `null` = never send. Not sent with thinking or on the Claude 5 family |
+| `topP` | number \| null | `0.95` | Top-P. `null` = never send. Same exclusions as `temperature` |
+| `topK` | number \| null | — | Top-K. `null` = never send. Same exclusions as `temperature` |
+| `thinking` | object | — | `{ type: 'adaptive', display? }`, or legacy `{ type: 'enabled', budget_tokens: N }` (translated on Claude 5) |
+| `effort` | string | — | `'low'`\|`'medium'`\|`'high'`\|`'xhigh'`\|`'max'`. Sets adaptive thinking + `output_config.effort` |
+| `adaptiveThinking` | boolean | `false` | Translate `budget_tokens` → adaptive on the 4.6 family too |
 | `cacheSystemPrompt` | boolean | `false` | Enable prompt caching on system prompt |
+| `cacheTtl` | string | `'5m'` | `'5m'` or `'1h'`. Cache writes bill at 1.25× input at 5m, 2× at 1h |
 | `enableWebSearch` | boolean | `false` | Enable Claude's web search tool |
 | `webSearchConfig` | object | — | Web search config (`max_uses`, `allowed_domains`, `blocked_domains`) |
 | `maxRetries` | number | `5` | Max SDK-level retry attempts for 429 errors |

@@ -96,11 +96,18 @@ class ToolAgent extends BaseClaude {
 
 		// ── Tools ──
 		// Accept both Claude format (input_schema) and Gemini format (parametersJsonSchema)
-		this.tools = (options.tools || []).map(t => ({
-			name: t.name,
-			description: t.description,
-			input_schema: t.input_schema || t.inputSchema || t.parametersJsonSchema
-		}));
+		this.tools = (options.tools || []).map((t, i) => {
+			const schema = t.input_schema || t.inputSchema || t.parametersJsonSchema;
+			if (!schema) {
+				// Forwarding `undefined` produces an opaque API 400 — fail here instead.
+				throw new Error(`ToolAgent: tool ${t?.name ? `"${t.name}"` : `at index ${i}`} has no parameter schema. Provide one of: input_schema (Claude), inputSchema, or parametersJsonSchema (Gemini). For a no-argument tool use { type: 'object', properties: {} }.`);
+			}
+			return {
+				name: t.name,
+				description: t.description,
+				input_schema: schema
+			};
+		});
 		this.toolExecutor = options.toolExecutor || null;
 
 		// Validate: if tools provided, executor is required (and vice versa)
@@ -226,6 +233,8 @@ class ToolAgent extends BaseClaude {
 		this._cumulativeUsage = {
 			promptTokens: this.lastResponseMetadata.promptTokens,
 			responseTokens: this.lastResponseMetadata.responseTokens,
+			cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
+			cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
 			totalTokens: this.lastResponseMetadata.totalTokens,
 			attempts: 1
 		};

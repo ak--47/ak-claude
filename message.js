@@ -178,16 +178,10 @@ class Message extends BaseClaude {
 			}
 		}
 
-		if (this.thinking) {
-			baseParams.thinking = this.thinking;
-		} else if (this.vertexai && this.temperature !== undefined && this.topP !== undefined) {
-			// Vertex AI rejects temperature + top_p together — prefer temperature.
-			baseParams.temperature = this.temperature;
-			log.debug('Vertex AI: Using temperature only (topP ignored)');
-		} else {
-			if (this.temperature !== undefined) baseParams.temperature = this.temperature;
-			if (this.topP !== undefined) baseParams.top_p = this.topP;
-		}
+		// Thinking must be applied AFTER output_config.format above — it merges
+		// `effort` into the same object rather than replacing it.
+		this._applyThinkingParams(baseParams);
+		this._applySamplingParams(baseParams);
 
 		let userContent = payloadStr;
 		let text = '';
@@ -200,7 +194,7 @@ class Message extends BaseClaude {
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			const params = { ...baseParams, messages: [{ role: /** @type {'user'} */ ('user'), content: userContent }] };
-			const response = await this.client.messages.create(params);
+			const response = await this._callWithVertexHints(() => this.client.messages.create(params));
 			lastResponse = response;
 			attempts = attempt;
 

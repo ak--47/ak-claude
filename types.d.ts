@@ -1,8 +1,53 @@
 // ── Shared Types ─────────────────────────────────────────────────────────────
 
-export interface ThinkingConfig {
+/**
+ * Reasoning depth for adaptive thinking, sent as `output_config.effort`.
+ * NOTE: 'xhigh' is NOT supported on Opus 4.6 / Sonnet 4.6 — it is clamped to 'high' there.
+ */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** How thinking blocks are surfaced. Defaults to 'omitted' on the Claude 5 family. */
+export type ThinkingDisplay = 'omitted' | 'summarized';
+
+/**
+ * Adaptive thinking (Claude 4.6+). The model decides how much to think;
+ * depth is controlled by the `effort` option, not a token budget.
+ */
+export interface AdaptiveThinkingConfig {
+  type: 'adaptive';
+  display?: ThinkingDisplay;
+}
+
+/**
+ * Legacy budget-based extended thinking.
+ * DEPRECATED on Opus 4.6 / Sonnet 4.6 and REJECTED with a 400 on the Claude 5
+ * family (Fable 5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5) — on those models it is
+ * automatically translated to adaptive thinking + an equivalent effort level.
+ */
+export interface BudgetThinkingConfig {
   type: 'enabled';
   budget_tokens: number;
+  display?: ThinkingDisplay;
+}
+
+export type ThinkingConfig = AdaptiveThinkingConfig | BudgetThinkingConfig;
+
+/** Prompt-cache TTL. Cache writes bill at 1.25x input at '5m', 2x at '1h'. */
+export type CacheTtl = '5m' | '1h';
+
+/** Per-million-token pricing entry. An `intro` block models a promotional window. */
+export interface ModelPricing {
+  input: number;
+  output: number;
+  intro?: { input: number; output: number; until: string };
+}
+
+/** Pricing resolved for a point in time. `introUntil` is set when a promo rate is active. */
+export interface ResolvedPricing extends ModelPricing {
+  /** Last date the pricing table was verified (YYYY-MM-DD). */
+  asOf: string;
+  /** Set when the returned rate is promotional; the date the promo ends. */
+  introUntil?: string;
 }
 
 export interface ResponseMetadata {
@@ -37,7 +82,10 @@ export interface UsageData {
   /** Stop reason (e.g., 'end_turn', 'tool_use', 'max_tokens') */
   stopReason: string | null;
   timestamp: number;
-  /** Estimated USD cost from MODEL_PRICING (input+output). null when the model's pricing is unknown. */
+  /**
+   * Estimated USD cost from MODEL_PRICING (input + output + cache tokens).
+   * `null` means pricing is UNKNOWN for this model — NOT that the call was free.
+   */
   estimatedCost?: number | null;
 }
 
@@ -80,18 +128,46 @@ export interface BaseClaudeOptions {
   // Generation config
   /** Maximum output tokens (default: 8192) */
   maxTokens?: number;
-  /** Temperature (default: 0.7). Not used with extended thinking. */
-  temperature?: number;
-  /** Top-P (default: 0.95). Not used with extended thinking. */
-  topP?: number;
-  /** Top-K (optional) */
-  topK?: number;
+  /**
+   * Temperature (default: 0.7). Pass `null` to never send it.
+   * Not sent with extended thinking, and never sent to Claude 5-family models
+   * (Fable 5 / Opus 5 / Opus 4.8 / Opus 4.7 / Sonnet 5), which reject it with a 400.
+   */
+  temperature?: number | null;
+  /** Top-P (default: 0.95 on the direct API). Pass `null` to never send it. Same Claude 5 restriction as `temperature`. */
+  topP?: number | null;
+  /** Top-K (optional). Pass `null` to never send it. Same Claude 5 restriction as `temperature`. */
+  topK?: number | null;
 
-  /** Extended thinking configuration */
+  /**
+   * Extended thinking configuration. Prefer `{ type: 'adaptive' }` plus `effort`;
+   * the legacy `{ type: 'enabled', budget_tokens }` shape is auto-translated on
+   * models that reject it.
+   */
   thinking?: ThinkingConfig | null;
+
+  /**
+   * Reasoning depth for adaptive thinking, sent as `output_config.effort`.
+   * Setting it implies `thinking: { type: 'adaptive' }`. Takes precedence over
+   * `thinking.budget_tokens`. Throws on an invalid level.
+   * (Mirrors ak-gemini's `effort`, which maps to `thinkingConfig.thinkingLevel`.)
+   */
+  effort?: EffortLevel | null;
+
+  /**
+   * Translate legacy `budget_tokens` to adaptive thinking on Opus 4.6 / Sonnet 4.6
+   * (default: false), silencing Anthropic's deprecation warning. Claude 5-family
+   * models are always translated regardless of this flag.
+   */
+  adaptiveThinking?: boolean;
 
   /** Enable prompt caching on the system prompt (default: false) */
   cacheSystemPrompt?: boolean;
+  /**
+   * TTL for `cacheSystemPrompt` writes (default: '5m'). '1h' sets
+   * `cache_control.ttl` and bills cache writes at 2x input instead of 1.25x.
+   */
+  cacheTtl?: CacheTtl;
 
   /** Max SDK-level retry attempts for 429 errors (default: 5) */
   maxRetries?: number;
@@ -513,11 +589,14 @@ export declare class BaseClaude {
   lastResponseMetadata: ResponseMetadata | null;
   exampleCount: number;
   maxTokens: number;
-  temperature: number;
-  topP: number;
+  temperature: number | undefined;
+  topP: number | undefined;
   topK: number | undefined;
   thinking: ThinkingConfig | null;
+  effort: EffortLevel | null;
+  adaptiveThinking: boolean;
   cacheSystemPrompt: boolean;
+  cacheTtl: CacheTtl;
   enableWebSearch: boolean;
   webSearchConfig: { max_uses?: number; allowed_domains?: string[]; blocked_domains?: string[] };
 
@@ -530,10 +609,18 @@ export declare class BaseClaude {
   estimateCost(nextPayload: Record<string, unknown> | string): Promise<{
     inputTokens: number;
     model: string;
-    pricing: { input: number; output: number } | null;
+    pricing: ResolvedPricing | null;
     estimatedInputCost: number | null;
     note: string;
   }>;
+  /** @internal Validates the `effort` option; throws on an unknown level. */
+  protected _normalizeEffort(effort?: string | null): EffortLevel | null;
+  /** True when the model rejects temperature/top_p/top_k and `thinking.budget_tokens`. */
+  protected _isClaude5Family(modelName?: string): boolean;
+  /** Applies temperature/top_p/top_k to request params, gated by model family. Mutates and returns `params`. */
+  protected _applySamplingParams(params: any, modelName?: string): any;
+  /** Applies thinking + `output_config.effort` to request params, merging into any existing `output_config`. */
+  protected _applyThinkingParams(params: any, modelName?: string): any;
   listModels(): AsyncGenerator<any, void, unknown>;
   getModel(modelId: string): Promise<any>;
 }
@@ -662,11 +749,36 @@ export declare function attemptJSONRecovery(text: string, maxAttempts?: number):
 export declare function validateSchema(data: any, schema: Record<string, any>, path?: string): string[];
 
 /** Per-million-token pricing keyed by model id. */
-export declare const MODEL_PRICING: Record<string, { input: number; output: number }>;
-/** Resolves pricing for a model id (handles Vertex dated snapshots). null when unknown. */
-export declare function resolvePricing(modelId: string | null | undefined): { input: number; output: number } | null;
-/** Estimated USD cost from token counts. null when the model's pricing is unknown. */
-export declare function computeCost(modelId: string | null | undefined, promptTokens: number, responseTokens: number): number | null;
+export declare const MODEL_PRICING: Record<string, ModelPricing>;
+/** Date the pricing table was last verified (YYYY-MM-DD). */
+export declare const MODEL_PRICING_AS_OF: string;
+/** Valid `output_config.effort` levels, ordered low → max. */
+export declare const EFFORT_LEVELS: readonly EffortLevel[];
+/**
+ * Resolves pricing for a model id (handles Vertex dated snapshots and promotional
+ * windows). `null` means pricing is UNKNOWN — not free.
+ * @param opts.at Point in time used to evaluate promotional pricing. Defaults to now.
+ */
+export declare function resolvePricing(
+  modelId: string | null | undefined,
+  opts?: { at?: Date | string | number }
+): ResolvedPricing | null;
+/**
+ * Estimated USD cost from token counts. `null` means pricing is UNKNOWN — not free.
+ *
+ * Anthropic's `input_tokens` EXCLUDES cache tokens, so cache-creation and
+ * cache-read tokens are billed ON TOP of `promptTokens`.
+ */
+export declare function computeCost(
+  modelId: string | null | undefined,
+  promptTokens: number,
+  responseTokens: number,
+  cacheCreationTokens?: number,
+  cacheReadTokens?: number,
+  opts?: { at?: Date | string | number; cacheTtl?: CacheTtl }
+): number | null;
+/** Maps a legacy `thinking.budget_tokens` value to an effort level. null = omit thinking. */
+export declare function budgetTokensToEffort(budgetTokens: number): 'low' | 'medium' | 'high' | 'xhigh' | null;
 
 declare const _default: {
   Transformer: typeof Transformer;

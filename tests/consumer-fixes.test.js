@@ -7,7 +7,10 @@
 
 import { jest } from '@jest/globals';
 import { Message } from '../index.js';
-import { validateSchema, resolvePricing, computeCost } from '../index.js';
+import { validateSchema, resolvePricing, computeCost, budgetTokensToEffort, MODEL_PRICING, EFFORT_LEVELS } from '../index.js';
+import Chat from '../chat.js';
+import Transformer from '../transformer.js';
+import ToolAgent from '../tool-agent.js';
 
 const KEY = { apiKey: 'test-key', logLevel: 'silent' };
 
@@ -131,8 +134,8 @@ describe('consumer-fixes (ak-claude)', () => {
 		});
 
 		it('resolves bare opus-4-5 / sonnet-4-5 ids (B2)', () => {
-			expect(resolvePricing('claude-opus-4-5')).toEqual({ input: 15.00, output: 75.00 });
-			expect(resolvePricing('claude-sonnet-4-5')).toEqual({ input: 3.00, output: 15.00 });
+			expect(resolvePricing('claude-opus-4-5')).toMatchObject({ input: 15.00, output: 75.00 });
+			expect(resolvePricing('claude-sonnet-4-5')).toMatchObject({ input: 3.00, output: 15.00 });
 		});
 
 		it('includes cache-token billing in estimatedCost (S2)', async () => {
@@ -240,6 +243,289 @@ describe('consumer-fixes (ak-claude)', () => {
 			const c2 = await unknown.estimateCost('hi');
 			expect(c2.estimatedInputCost).toBeNull();
 			expect(c2.pricing).toBeNull();
+		});
+	});
+
+	// ── 0.2.0: Claude 5 family sampling gate (A1/A3/A4) ──
+	describe('A1/A3/A4 Claude 5 family rejects sampling params', () => {
+		const FIVE = ['claude-fable-5', 'claude-mythos-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7'];
+
+		it.each(FIVE)('sends no temperature/top_p/top_k for %s', async (modelName) => {
+			const msg = new Message({ ...KEY, modelName, topP: 0.9, topK: 40 });
+			msg._initialized = true;
+			const create = jest.fn(async () => textResponse('r', 1, 1, modelName));
+			msg.client = { messages: { create } };
+			await msg.send('hi');
+			const sent = create.mock.calls[0][0];
+			expect(sent.temperature).toBeUndefined();
+			expect(sent.top_p).toBeUndefined();
+			expect(sent.top_k).toBeUndefined();
+		});
+
+		it('still sends sampling params on claude-sonnet-4-6', async () => {
+			const msg = new Message({ ...KEY, modelName: 'claude-sonnet-4-6', topP: 0.9, topK: 40 });
+			msg._initialized = true;
+			const create = jest.fn(async () => textResponse('r', 1, 1));
+			msg.client = { messages: { create } };
+			await msg.send('hi');
+			const sent = create.mock.calls[0][0];
+			expect(sent.temperature).toBe(0.7);
+			expect(sent.top_p).toBe(0.9);
+			expect(sent.top_k).toBe(40);
+		});
+
+		it('null means never-send, distinct from undefined', async () => {
+			const msg = new Message({ ...KEY, modelName: 'claude-sonnet-4-6', temperature: null, topP: null, topK: null });
+			msg._initialized = true;
+			const create = jest.fn(async () => textResponse('r', 1, 1));
+			msg.client = { messages: { create } };
+			await msg.send('hi');
+			const sent = create.mock.calls[0][0];
+			expect(sent).not.toHaveProperty('temperature');
+			expect(sent).not.toHaveProperty('top_p');
+			expect(sent).not.toHaveProperty('top_k');
+		});
+
+		it('A4: top_k is suppressed when thinking is active', async () => {
+			const msg = new Message({ ...KEY, modelName: 'claude-sonnet-4-6', topK: 40, thinking: { type: 'adaptive' } });
+			msg._initialized = true;
+			const create = jest.fn(async () => textResponse('r', 1, 1));
+			msg.client = { messages: { create } };
+			await msg.send('hi');
+			expect(create.mock.calls[0][0].top_k).toBeUndefined();
+		});
+	});
+
+	// ── 0.2.0: adaptive thinking + effort (A2) ──
+	describe('A2 adaptive thinking + effort', () => {
+		async function sentParams(options) {
+			const msg = new Message({ ...KEY, ...options });
+			msg._initialized = true;
+			const create = jest.fn(async () => textResponse('r', 1, 1, msg.modelName));
+			msg.client = { messages: { create } };
+			await msg.send('hi');
+			return create.mock.calls[0][0];
+		}
+
+		it('effort produces adaptive thinking + output_config.effort', async () => {
+			const sent = await sentParams({ modelName: 'claude-sonnet-5', effort: 'low' });
+			expect(sent.thinking).toEqual({ type: 'adaptive' });
+			expect(sent.output_config).toEqual({ effort: 'low' });
+		});
+
+		it.each([
+			[0, undefined],
+			[1, 'low'],
+			[2048, 'low'],
+			[2049, 'medium'],
+			[8192, 'medium'],
+			[8193, 'high'],
+			[24576, 'high'],
+			[24577, 'xhigh']
+		])('budget_tokens %i maps to effort %s on Claude 5', async (budget, expected) => {
+			const sent = await sentParams({ modelName: 'claude-sonnet-5', thinking: { type: 'enabled', budget_tokens: budget } });
+			if (expected === undefined) {
+				expect(sent.thinking).toBeUndefined();
+				expect(sent.output_config).toBeUndefined();
+			} else {
+				expect(sent.thinking).toEqual({ type: 'adaptive' });
+				expect(sent.output_config.effort).toBe(expected);
+			}
+		});
+
+		it('budgetTokensToEffort matches the documented boundaries', () => {
+			expect(budgetTokensToEffort(0)).toBeNull();
+			expect(budgetTokensToEffort(2048)).toBe('low');
+			expect(budgetTokensToEffort(2049)).toBe('medium');
+			expect(budgetTokensToEffort(8192)).toBe('medium');
+			expect(budgetTokensToEffort(8193)).toBe('high');
+			expect(budgetTokensToEffort(24576)).toBe('high');
+			expect(budgetTokensToEffort(24577)).toBe('xhigh');
+		});
+
+		it('4.6 keeps the legacy budget_tokens shape unless adaptiveThinking is set', async () => {
+			const legacy = await sentParams({ modelName: 'claude-sonnet-4-6', thinking: { type: 'enabled', budget_tokens: 4096 } });
+			expect(legacy.thinking).toEqual({ type: 'enabled', budget_tokens: 4096 });
+			expect(legacy.output_config).toBeUndefined();
+
+			const optedIn = await sentParams({ modelName: 'claude-sonnet-4-6', adaptiveThinking: true, thinking: { type: 'enabled', budget_tokens: 4096 } });
+			expect(optedIn.thinking).toEqual({ type: 'adaptive' });
+			expect(optedIn.output_config.effort).toBe('medium');
+		});
+
+		it('clamps xhigh to high on the 4.6 family only', async () => {
+			const clamped = await sentParams({ modelName: 'claude-opus-4-6', effort: 'xhigh' });
+			expect(clamped.output_config.effort).toBe('high');
+			const kept = await sentParams({ modelName: 'claude-opus-4-8', effort: 'xhigh' });
+			expect(kept.output_config.effort).toBe('xhigh');
+		});
+
+		it('passes thinking.display through verbatim on both paths', async () => {
+			const adaptive = await sentParams({ modelName: 'claude-sonnet-5', thinking: { type: 'adaptive', display: 'summarized' } });
+			expect(adaptive.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
+			const translated = await sentParams({ modelName: 'claude-sonnet-5', thinking: { type: 'enabled', budget_tokens: 4096, display: 'summarized' } });
+			expect(translated.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
+		});
+
+		it('output_config carries BOTH format and effort (native structured output)', async () => {
+			const msg = new Message({ ...KEY, modelName: 'claude-sonnet-5', responseSchema: SCHEMA, effort: 'high' });
+			msg._initialized = true;
+			const create = jest.fn(async () => textResponse(JSON.stringify({ source: 'web' }), 1, 1, 'claude-sonnet-5'));
+			msg.client = { messages: { create } };
+			await msg.send('hi');
+			const sent = create.mock.calls[0][0];
+			expect(sent.output_config.effort).toBe('high');
+			expect(sent.output_config.format).toBeDefined();
+			expect(sent.output_config.format.type).toBe('json_schema');
+		});
+
+		it('rejects an unknown effort level at construction', () => {
+			expect(() => new Message({ ...KEY, effort: 'turbo' })).toThrow(/Invalid effort/);
+			expect(EFFORT_LEVELS).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+		});
+	});
+
+	// ── 0.2.0: all call sites emit identical params (A0) ──
+	describe('A0 every call site applies the same sampling/thinking helpers', () => {
+		const CFG = { modelName: 'claude-sonnet-5', effort: 'medium', topK: 40 };
+
+		function stub(instance, model = 'claude-sonnet-5') {
+			const create = jest.fn(async () => textResponse('{"ok":true}', 1, 1, model));
+			instance.client = { messages: { create } };
+			instance._initialized = true;
+			return create;
+		}
+
+		it('Message, Chat, and Transformer._statelessSend agree', async () => {
+			const msg = new Message({ ...KEY, ...CFG });
+			const msgCreate = stub(msg);
+			await msg.send('hi');
+
+			const chat = new Chat({ ...KEY, ...CFG });
+			const chatCreate = stub(chat);
+			await chat.send('hi');
+
+			const tr = new Transformer({ ...KEY, ...CFG });
+			const trCreate = stub(tr);
+			await tr.send({ hi: 1 }, { stateless: true });
+
+			for (const create of [msgCreate, chatCreate, trCreate]) {
+				const sent = create.mock.calls[0][0];
+				expect(sent.thinking).toEqual({ type: 'adaptive' });
+				expect(sent.output_config).toMatchObject({ effort: 'medium' });
+				expect(sent.temperature).toBeUndefined();
+				expect(sent.top_p).toBeUndefined();
+				expect(sent.top_k).toBeUndefined();
+			}
+		});
+	});
+
+	// ── 0.2.0: pricing table coverage + intro window (A3/A5/C) ──
+	describe('A3/A5 pricing table', () => {
+		it('prices every table key and classifies each against the family regex', () => {
+			for (const id of Object.keys(MODEL_PRICING)) {
+				const p = resolvePricing(id);
+				expect(p).not.toBeNull();
+				expect(typeof p.input).toBe('number');
+				expect(typeof p.output).toBe('number');
+				expect(p.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+			}
+		});
+
+		it('includes the models the family regex now matches', () => {
+			for (const id of ['claude-opus-5', 'claude-mythos-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7']) {
+				expect(resolvePricing(id)).not.toBeNull();
+			}
+		});
+
+		it('applies Sonnet 5 intro pricing only inside the window', () => {
+			const before = resolvePricing('claude-sonnet-5', { at: '2026-07-01' });
+			expect(before.input).toBe(2.00);
+			expect(before.output).toBe(10.00);
+			expect(before.introUntil).toBe('2026-08-31');
+
+			const after = resolvePricing('claude-sonnet-5', { at: '2026-09-01' });
+			expect(after.input).toBe(3.00);
+			expect(after.output).toBe(15.00);
+			expect(after.introUntil).toBeUndefined();
+
+			expect(computeCost('claude-sonnet-5', 1_000_000, 0, 0, 0, { at: '2026-07-01' })).toBeCloseTo(2.00, 5);
+			expect(computeCost('claude-sonnet-5', 1_000_000, 0, 0, 0, { at: '2026-09-01' })).toBeCloseTo(3.00, 5);
+		});
+
+		it('bills 1h cache writes at 2x and 5m writes at 1.25x (C)', () => {
+			const fiveMin = computeCost('claude-sonnet-4-6', 0, 0, 1_000_000, 0);
+			const oneHour = computeCost('claude-sonnet-4-6', 0, 0, 1_000_000, 0, { cacheTtl: '1h' });
+			expect(fiveMin).toBeCloseTo(3.00 * 1.25, 5);
+			expect(oneHour).toBeCloseTo(3.00 * 2, 5);
+		});
+	});
+
+	// ── A8: ToolAgent schema validation ──
+	// ── A9 cumulative usage carries cache tokens ──
+	describe('A9 getLastUsage() reports cache tokens, not just the last call', () => {
+		function cachedResponse(text, cacheCreate, cacheRead) {
+			return {
+				content: [{ type: 'text', text }],
+				model: 'claude-sonnet-4-6',
+				stop_reason: 'end_turn',
+				usage: {
+					input_tokens: 10,
+					output_tokens: 5,
+					cache_creation_input_tokens: cacheCreate,
+					cache_read_input_tokens: cacheRead
+				}
+			};
+		}
+
+		it('Chat seeds cache tokens into _cumulativeUsage', async () => {
+			const chat = new Chat({ ...KEY });
+			chat._initialized = true;
+			chat.client = { messages: { create: jest.fn(async () => cachedResponse('hi', 400, 900)) } };
+
+			await chat.send('hello');
+			const usage = chat.getLastUsage();
+			expect(usage.cacheCreationTokens).toBe(400);
+			expect(usage.cacheReadTokens).toBe(900);
+			expect(chat._cumulativeUsage.cacheCreationTokens).toBe(400);
+			expect(chat._cumulativeUsage.cacheReadTokens).toBe(900);
+		});
+
+		it('Transformer accumulates cache tokens across validation retries', async () => {
+			let calls = 0;
+			const validator = async () => {
+				if (++calls === 1) throw new Error('nope');
+			};
+			const t = new Transformer({ ...KEY, validationRetries: 1, retryDelay: 0, asyncValidator: validator });
+			t._initialized = true;
+			const create = jest.fn(async () => cachedResponse(JSON.stringify({ source: 'web' }), 100, 200));
+			t.client = { messages: { create } };
+
+			await t.send({ q: 'x' });
+			expect(create).toHaveBeenCalledTimes(2);
+			const usage = t.getLastUsage();
+			// Prompt tokens are summed across both attempts — cache tokens must be too.
+			expect(usage.promptTokens).toBe(20);
+			expect(usage.cacheCreationTokens).toBe(200);
+			expect(usage.cacheReadTokens).toBe(400);
+		});
+	});
+
+	describe('A8 ToolAgent rejects a tool with no parameter schema', () => {
+		it('throws naming the offending tool', () => {
+			expect(() => new ToolAgent({
+				...KEY,
+				tools: [{ name: 'lookup', description: 'x' }],
+				toolExecutor: async () => ({})
+			})).toThrow(/lookup/);
+		});
+
+		it('accepts any of the three schema key aliases', () => {
+			const mk = (tool) => new ToolAgent({ ...KEY, tools: [tool], toolExecutor: async () => ({}) });
+			const schema = { type: 'object', properties: {} };
+			expect(mk({ name: 'a', input_schema: schema }).tools[0].input_schema).toEqual(schema);
+			expect(mk({ name: 'b', inputSchema: schema }).tools[0].input_schema).toEqual(schema);
+			expect(mk({ name: 'c', parametersJsonSchema: schema }).tools[0].input_schema).toEqual(schema);
 		});
 	});
 });

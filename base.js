@@ -20,16 +20,30 @@ import { isJSON } from './json-helpers.js';
 
 const DEFAULT_MAX_TOKENS = 8192;
 
+/** Date the pricing table below was last verified against Anthropic's pricing page. */
+const MODEL_PRICING_AS_OF = '2026-07-28';
+
 /**
- * Model pricing per million tokens (as of July 2026).
+ * Model pricing per million tokens (as of MODEL_PRICING_AS_OF).
  * Bare IDs (no date suffix) match both the direct API and Vertex AI publisher
  * model IDs for current-generation models. Vertex dated snapshots use an
  * `@` separator (e.g. claude-opus-4-5@20250514) — add entries as needed.
+ *
+ * An optional `intro: { input, output, until }` models promotional pricing:
+ * resolvePricing() returns the intro rate up to and including `until`, then
+ * falls back to the base rate. See resolvePricing({ at }).
+ *
+ * NOTE: a null result means pricing is UNKNOWN, not free.
  */
 const MODEL_PRICING = {
 	// Claude 5 family
 	'claude-fable-5': { input: 10.00, output: 50.00 },
-	'claude-sonnet-5': { input: 3.00, output: 15.00 }, // intro pricing ($2/$10) through 2026-08-31 not modelled
+	'claude-mythos-5': { input: 10.00, output: 50.00 }, // Project Glasswing only
+	'claude-opus-5': { input: 5.00, output: 25.00 },
+	'claude-sonnet-5': {
+		input: 3.00, output: 15.00,
+		intro: { input: 2.00, output: 10.00, until: '2026-08-31' }
+	},
 	// Opus 4.x
 	'claude-opus-4-8': { input: 5.00, output: 25.00 },
 	'claude-opus-4-7': { input: 5.00, output: 25.00 },
@@ -46,13 +60,47 @@ const MODEL_PRICING = {
 };
 
 /**
+ * Applies an active `intro` promotional window to a pricing entry.
+ * The window is inclusive of `until` (compared at end-of-day UTC).
+ * @param {any} entry
+ * @param {Date|string|number} [at]
+ * @returns {any}
+ */
+function _applyIntroPricing(entry, at) {
+	if (!entry?.intro) return entry;
+	const now = at === undefined ? new Date() : new Date(at);
+	const until = new Date(`${entry.intro.until}T23:59:59.999Z`);
+	if (Number.isNaN(now.getTime()) || now > until) return entry;
+	return {
+		...entry,
+		input: entry.intro.input,
+		output: entry.intro.output,
+		introUntil: entry.intro.until
+	};
+}
+
+/**
  * Resolves pricing for a model id.
  * Handles Vertex dated snapshots (`claude-opus-4-5@20250514`) by falling back to
- * the bare id. Returns null when the model's pricing is unknown.
+ * the bare id. Returns null when the model's pricing is UNKNOWN (not free).
  * @param {string|null|undefined} modelId
- * @returns {{ input: number, output: number }|null}
+ * @param {Object} [opts={}]
+ * @param {Date|string|number} [opts.at] - Point in time for promotional pricing. Defaults to now.
+ * @returns {{ input: number, output: number, intro?: Object, introUntil?: string, asOf: string }|null}
  */
-function resolvePricing(modelId) {
+function resolvePricing(modelId, opts = {}) {
+	const entry = _lookupPricing(modelId);
+	if (!entry) return null;
+	return { ..._applyIntroPricing(entry, opts.at), asOf: MODEL_PRICING_AS_OF };
+}
+
+/**
+ * Raw table lookup with dated-snapshot fallback. No promo/asOf handling.
+ * @param {string|null|undefined} modelId
+ * @returns {any|null}
+ * @private
+ */
+function _lookupPricing(modelId) {
 	if (!modelId) return null;
 	if (MODEL_PRICING[modelId]) return MODEL_PRICING[modelId];
 	// Vertex dated snapshots use an `@` separator, e.g. claude-opus-4-5@20250514.
@@ -70,27 +118,38 @@ function resolvePricing(modelId) {
 	return null;
 }
 
-/** Anthropic cache-token multipliers relative to the base input rate. */
-const CACHE_WRITE_MULTIPLIER = 1.25; // cache_creation_input_tokens
+/**
+ * Anthropic cache-token multipliers relative to the base input rate.
+ * Cache WRITE depends on TTL: 1.25x at the default 5-minute TTL, 2x at 1 hour.
+ */
+const CACHE_WRITE_MULTIPLIER = 1.25; // cache_creation_input_tokens, 5m TTL
+const CACHE_WRITE_MULTIPLIER_1H = 2; // cache_creation_input_tokens, ttl: '1h'
 const CACHE_READ_MULTIPLIER = 0.1;   // cache_read_input_tokens
 
 /**
  * Computes estimated USD cost from token counts using MODEL_PRICING.
- * `input_tokens` from the API EXCLUDES cache tokens, so cache-write (1.25x input)
- * and cache-read (0.1x input) are added on top.
+ *
+ * Anthropic's `input_tokens` EXCLUDES cache tokens, so cache-write and cache-read
+ * are ADDED on top. (ak-gemini is the opposite — its `promptTokenCount` INCLUDES
+ * cached tokens and must be subtracted. Do not "unify" these.)
+ *
  * @param {string|null|undefined} modelId
  * @param {number} promptTokens
  * @param {number} responseTokens
  * @param {number} [cacheCreationTokens=0]
  * @param {number} [cacheReadTokens=0]
- * @returns {number|null} Cost in USD, or null when pricing is unknown.
+ * @param {Object} [opts={}]
+ * @param {Date|string|number} [opts.at] - Point in time for promotional pricing.
+ * @param {'5m'|'1h'} [opts.cacheTtl='5m'] - TTL the cache was written with; '1h' bills writes at 2x instead of 1.25x.
+ * @returns {number|null} Cost in USD, or null when pricing is UNKNOWN (not free).
  */
-function computeCost(modelId, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
-	const pricing = resolvePricing(modelId);
+function computeCost(modelId, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0, opts = {}) {
+	const pricing = resolvePricing(modelId, { at: opts.at });
 	if (!pricing) return null;
+	const writeMultiplier = opts.cacheTtl === '1h' ? CACHE_WRITE_MULTIPLIER_1H : CACHE_WRITE_MULTIPLIER;
 	return (promptTokens / 1_000_000) * pricing.input
 		+ (responseTokens / 1_000_000) * pricing.output
-		+ (cacheCreationTokens / 1_000_000) * pricing.input * CACHE_WRITE_MULTIPLIER
+		+ (cacheCreationTokens / 1_000_000) * pricing.input * writeMultiplier
 		+ (cacheReadTokens / 1_000_000) * pricing.input * CACHE_READ_MULTIPLIER;
 }
 
@@ -102,10 +161,45 @@ function computeCost(modelId, promptTokens, responseTokens, cacheCreationTokens 
  */
 const GLOBAL_OR_MULTIREGION = new Set(['global', 'us', 'eu']);
 
-/** Models that require a global/multi-region Vertex endpoint (not a specific region). */
-const CLAUDE5_FAMILY_REGEX = /^claude-(sonnet-5|opus-4-[78]|fable-5|mythos)/;
+/**
+ * Claude 5-family models. These:
+ *  - reject `temperature` / `top_p` / `top_k` with a 400,
+ *  - reject `thinking.budget_tokens` with a 400 (use adaptive thinking + effort),
+ *  - require a global/multi-region Vertex endpoint (not a specific region).
+ */
+const CLAUDE5_FAMILY_REGEX = /^claude-(opus|sonnet|haiku)-5|^claude-opus-4-[78]|^claude-(fable-5|mythos)/;
 
-export { MODEL_PRICING, DEFAULT_MAX_TOKENS, resolvePricing, computeCost };
+/** Opus 4.6 / Sonnet 4.6 — support adaptive thinking, but `budget_tokens` still works (deprecated). */
+const CLAUDE46_FAMILY_REGEX = /^claude-(opus|sonnet)-4-6/;
+
+/** Valid `output_config.effort` levels. `xhigh` is NOT available on the 4.6 family. */
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LEVELS_4_6 = ['low', 'medium', 'high', 'max'];
+
+/**
+ * Maps a legacy `thinking.budget_tokens` value onto an `output_config.effort` level.
+ * Returns null when thinking should be omitted entirely (budget 0 / falsy).
+ * @param {number} budgetTokens
+ * @returns {'low'|'medium'|'high'|'xhigh'|null}
+ */
+function budgetTokensToEffort(budgetTokens) {
+	const n = Number(budgetTokens) || 0;
+	if (n <= 0) return null;
+	if (n <= 2048) return 'low';
+	if (n <= 8192) return 'medium';
+	if (n <= 24576) return 'high';
+	return 'xhigh';
+}
+
+export {
+	MODEL_PRICING,
+	MODEL_PRICING_AS_OF,
+	DEFAULT_MAX_TOKENS,
+	EFFORT_LEVELS,
+	resolvePricing,
+	computeCost,
+	budgetTokensToEffort
+};
 
 // ── BaseClaude Class ─────────────────────────────────────────────────────────
 
@@ -161,17 +255,33 @@ class BaseClaude {
 		}
 
 		// ── Generation Config ──
+		// `undefined` means "use the default"; `null` means "never send this param".
+		// The Claude 5 family rejects all three with a 400 — _applySamplingParams()
+		// drops them for those models regardless of what is set here.
 		this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
-		this.temperature = options.temperature ?? 0.7;
+		this.temperature = options.temperature === null ? undefined : (options.temperature ?? 0.7);
 		// Vertex AI doesn't allow both temperature and topP - only set topP default for direct API
-		this.topP = options.topP ?? (this.vertexai ? undefined : 0.95);
-		this.topK = options.topK ?? undefined;
+		this.topP = options.topP === null ? undefined : (options.topP ?? (this.vertexai ? undefined : 0.95));
+		this.topK = options.topK === null ? undefined : (options.topK ?? undefined);
 
 		// ── Extended Thinking ──
+		// `thinking` accepts the current shape ({ type: 'adaptive', display? }) or the
+		// legacy one ({ type: 'enabled', budget_tokens }); the legacy shape is
+		// translated to adaptive + effort on models that reject budget_tokens.
 		this.thinking = options.thinking ?? null;
+		// Reasoning depth for adaptive thinking → output_config.effort.
+		// Same option name as ak-gemini (mapped there to thinkingConfig.thinkingLevel).
+		this.effort = this._normalizeEffort(options.effort);
+		// Opt in to translating legacy budget_tokens → adaptive on Opus/Sonnet 4.6,
+		// which silences Anthropic's budget_tokens deprecation warning. Off by default
+		// in 0.x — will become the default in the next major.
+		this.adaptiveThinking = options.adaptiveThinking ?? false;
 
 		// ── Prompt Caching ──
 		this.cacheSystemPrompt = options.cacheSystemPrompt ?? false;
+		// Cache TTL affects both the wire request and cost: writes bill at 1.25x the
+		// input rate at the default 5m TTL, and 2x at 1h.
+		this.cacheTtl = options.cacheTtl === '1h' ? '1h' : '5m';
 
 		// ── Web Search ──
 		this.enableWebSearch = options.enableWebSearch ?? false;
@@ -218,6 +328,8 @@ class BaseClaude {
 		this._cumulativeUsage = {
 			promptTokens: 0,
 			responseTokens: 0,
+			cacheCreationTokens: 0,
+			cacheReadTokens: 0,
 			totalTokens: 0,
 			attempts: 0
 		};
@@ -279,6 +391,32 @@ class BaseClaude {
 		}
 	}
 
+	/**
+	 * Wraps an API call so provider-specific failures surface as actionable errors
+	 * instead of raw SDK noise. Currently: the Vertex 403 you get when a publisher
+	 * model requires data sharing to be enabled for the project.
+	 * @param {() => Promise<T>} fn
+	 * @param {string} [modelName]
+	 * @returns {Promise<T>}
+	 * @template T
+	 * @protected
+	 */
+	async _callWithVertexHints(fn, modelName = this.modelName) {
+		try {
+			return await fn();
+		} catch (e) {
+			if (this.vertexai && (e?.status === 403 || /permission|403/i.test(e?.message || ''))) {
+				throw new Error(
+					`Vertex AI denied access to "${modelName}" (403). Some Anthropic publisher models require publisher data sharing to be enabled for your project before Vertex will serve them. Enable it for this model with:\n` +
+					`  gcloud beta services vertex-ai publisher-models set-publisher-model-config anthropic/${modelName} --project=${this.vertexProjectId} --location=${this.vertexRegion} --publisher-model-config-from-file=<config>\n` +
+					`(or via the Model Garden UI → the model card → "Enable"). Original error: ${e?.message || e}`,
+					{ cause: e }
+				);
+			}
+			throw e;
+		}
+	}
+
 	// ── Initialization ───────────────────────────────────────────────────────
 
 	/**
@@ -331,7 +469,10 @@ class BaseClaude {
 	_buildSystemParam() {
 		if (!this.systemPrompt) return undefined;
 		if (this.cacheSystemPrompt) {
-			return [{ type: 'text', text: this.systemPrompt, cache_control: { type: 'ephemeral' } }];
+			const cacheControl = this.cacheTtl === '1h'
+				? { type: 'ephemeral', ttl: '1h' }
+				: { type: 'ephemeral' };
+			return [{ type: 'text', text: this.systemPrompt, cache_control: cacheControl }];
 		}
 		return this.systemPrompt;
 	}
@@ -356,6 +497,180 @@ class BaseClaude {
 		return [webSearchTool, ...tools];
 	}
 
+	// ── Request Param Builders ───────────────────────────────────────────────
+
+	/**
+	 * Validates an `effort` option. Throws on an unknown level so a typo surfaces
+	 * at construction rather than as an API 400.
+	 * @param {string|null|undefined} effort
+	 * @returns {'low'|'medium'|'high'|'xhigh'|'max'|null}
+	 * @private
+	 */
+	_normalizeEffort(effort) {
+		if (effort === undefined || effort === null) return null;
+		const level = String(effort).toLowerCase();
+		if (!EFFORT_LEVELS.includes(level)) {
+			throw new Error(`Invalid effort "${effort}". Expected one of: ${EFFORT_LEVELS.join(', ')}.`);
+		}
+		return /** @type {any} */ (level);
+	}
+
+	/**
+	 * True when the target model rejects temperature/top_p/top_k and
+	 * thinking.budget_tokens (the Claude 5 family).
+	 * @param {string} [modelName]
+	 * @returns {boolean}
+	 * @protected
+	 */
+	_isClaude5Family(modelName = this.modelName) {
+		return CLAUDE5_FAMILY_REGEX.test(modelName || '');
+	}
+
+	/**
+	 * Applies temperature / top_p / top_k to a request params object, in place.
+	 *
+	 * Skipped entirely when:
+	 *  - the model is Claude 5-family (these params 400 there), or
+	 *  - extended thinking is active (temperature is forced to 1 and top_p/top_k
+	 *    are unsupported).
+	 *
+	 * @param {any} params - Request params, mutated in place.
+	 * @param {string} [modelName] - Target model (defaults to this.modelName).
+	 * @returns {any} The same params object.
+	 * @protected
+	 */
+	_applySamplingParams(params, modelName = this.modelName) {
+		if (this._isClaude5Family(modelName)) {
+			const dropped = [
+				this.temperature !== undefined && 'temperature',
+				this.topP !== undefined && 'top_p',
+				this.topK !== undefined && 'top_k'
+			].filter(Boolean);
+			if (dropped.length) {
+				log.debug(`Model "${modelName}" rejects sampling params — dropping ${dropped.join(', ')}. Use \`effort\` to control reasoning depth instead.`);
+			}
+			return params;
+		}
+
+		// Extended thinking pins temperature to 1 and disallows top_p/top_k.
+		if (this._resolveThinking(modelName)) return params;
+
+		if (this.vertexai && this.temperature !== undefined && this.topP !== undefined) {
+			// Vertex AI rejects temperature and top_p together — prefer temperature.
+			params.temperature = this.temperature;
+			log.debug('Vertex AI: Using temperature only (topP ignored)');
+		} else {
+			if (this.temperature !== undefined) params.temperature = this.temperature;
+			if (this.topP !== undefined) params.top_p = this.topP;
+		}
+		if (this.topK !== undefined) params.top_k = this.topK;
+		return params;
+	}
+
+	/**
+	 * Resolves the thinking config to send for a model, translating the legacy
+	 * `{ type: 'enabled', budget_tokens }` shape where required.
+	 *
+	 * Resolution order:
+	 *  1. `effort` set                    → adaptive thinking at that effort
+	 *  2. `thinking: { type: 'adaptive' }` → forwarded as-is
+	 *  3. legacy `budget_tokens`           → translated to adaptive on models that
+	 *     reject it (Claude 5 family always; 4.6 family only with adaptiveThinking)
+	 *  4. otherwise                        → forwarded unchanged
+	 *
+	 * @param {string} [modelName]
+	 * @returns {{ thinking: any, effort: string|null }|null} null when no thinking should be sent.
+	 * @protected
+	 */
+	_resolveThinking(modelName = this.modelName) {
+		const isClaude5 = this._isClaude5Family(modelName);
+		const is46 = CLAUDE46_FAMILY_REGEX.test(modelName || '');
+		const supportsAdaptive = isClaude5 || is46;
+		const thinking = this.thinking;
+		const display = thinking?.display;
+
+		// (1) Explicit effort implies adaptive thinking.
+		if (this.effort) {
+			if (!supportsAdaptive) {
+				log.warn(`Model "${modelName}" does not support adaptive thinking — ignoring effort: '${this.effort}'. Use thinking: { type: 'enabled', budget_tokens: N } instead.`);
+				return thinking ? { thinking, effort: null } : null;
+			}
+			return {
+				thinking: { type: 'adaptive', ...(display && { display }) },
+				effort: this._clampEffort(this.effort, is46, modelName)
+			};
+		}
+
+		if (!thinking) return null;
+
+		// (2) Already adaptive — forward verbatim.
+		if (thinking.type === 'adaptive') {
+			if (!supportsAdaptive) {
+				log.warn(`Model "${modelName}" does not support adaptive thinking. Sending it anyway — the API may reject the request.`);
+			}
+			return { thinking, effort: null };
+		}
+
+		// (3) Legacy budget_tokens.
+		if (thinking.type === 'enabled') {
+			const mustTranslate = isClaude5 || (is46 && this.adaptiveThinking);
+			if (!mustTranslate) return { thinking, effort: null };
+
+			const effort = budgetTokensToEffort(thinking.budget_tokens);
+			if (!effort) {
+				log.debug(`thinking.budget_tokens=${thinking.budget_tokens} on "${modelName}" — omitting thinking entirely.`);
+				return null;
+			}
+			log.debug(`Model "${modelName}" rejects thinking.budget_tokens — translating budget_tokens=${thinking.budget_tokens} to adaptive thinking at effort '${effort}'.`);
+			return {
+				thinking: { type: 'adaptive', ...(display && { display }) },
+				effort: this._clampEffort(effort, is46, modelName)
+			};
+		}
+
+		// (4) Unknown shape — forward and let the API decide.
+		return { thinking, effort: null };
+	}
+
+	/**
+	 * Clamps an effort level to what the target model supports.
+	 * `xhigh` is not a valid level on Opus 4.6 / Sonnet 4.6.
+	 * @param {string} effort
+	 * @param {boolean} is46
+	 * @param {string} modelName
+	 * @returns {string}
+	 * @private
+	 */
+	_clampEffort(effort, is46, modelName) {
+		if (is46 && !EFFORT_LEVELS_4_6.includes(effort)) {
+			log.warn(`Effort '${effort}' is not supported on "${modelName}" (valid: ${EFFORT_LEVELS_4_6.join(', ')}). Clamping to 'high'.`);
+			return 'high';
+		}
+		return effort;
+	}
+
+	/**
+	 * Applies `thinking` and `output_config.effort` to a request params object, in place.
+	 *
+	 * MERGES into any pre-existing `params.output_config` — Message writes
+	 * `output_config.format` for native structured output, and overwriting it
+	 * would silently break `responseSchema`.
+	 *
+	 * @param {any} params - Request params, mutated in place.
+	 * @param {string} [modelName] - Target model (defaults to this.modelName).
+	 * @returns {any} The same params object.
+	 * @protected
+	 */
+	_applyThinkingParams(params, modelName = this.modelName) {
+		const resolved = this._resolveThinking(modelName);
+		if (!resolved) return params;
+		params.thinking = resolved.thinking;
+		if (resolved.effort) {
+			params.output_config = { ...(params.output_config || {}), effort: resolved.effort };
+		}
+		return params;
+	}
+
 	/**
 	 * Core method: sends a message via messages.create(), manages history.
 	 * Handles both string content and content block arrays (for tool_result).
@@ -376,34 +691,21 @@ class BaseClaude {
 		const tools = this._buildTools(opts.tools);
 
 		// Build request params
+		const model = opts.model || this.modelName;
 		/** @type {any} */
 		const params = {
-			model: opts.model || this.modelName,
+			model,
 			max_tokens: opts.maxTokens || this.maxTokens,
 			messages: [...this.history],
 			...(this._buildSystemParam() && { system: this._buildSystemParam() }),
-			...(this.topK !== undefined && { top_k: this.topK }),
 			...(tools && { tools }),
 			...(opts.tool_choice && { tool_choice: opts.tool_choice }),
 		};
 
-		// Temperature/topP not allowed with extended thinking
-		if (this.thinking) {
-			params.thinking = this.thinking;
-			// When thinking is enabled, temperature must be 1 and top_p/top_k are not supported
-		} else {
-			// Vertex AI doesn't allow both temperature and topP
-			if (this.vertexai && this.temperature !== undefined && this.topP !== undefined) {
-				// Prefer temperature, skip topP for Vertex AI
-				params.temperature = this.temperature;
-				log.debug('Vertex AI: Using temperature only (topP ignored)');
-			} else {
-				if (this.temperature !== undefined) params.temperature = this.temperature;
-				if (this.topP !== undefined) params.top_p = this.topP;
-			}
-		}
+		this._applyThinkingParams(params, model);
+		this._applySamplingParams(params, model);
 
-		const response = await this.client.messages.create(params);
+		const response = await this._callWithVertexHints(() => this.client.messages.create(params), model);
 
 		// Append assistant response to history
 		this.history.push({ role: 'assistant', content: response.content });
@@ -431,30 +733,19 @@ class BaseClaude {
 		// Build tools array, prepending web search if enabled
 		const tools = this._buildTools(opts.tools);
 
+		const model = opts.model || this.modelName;
 		/** @type {any} */
 		const params = {
-			model: opts.model || this.modelName,
+			model,
 			max_tokens: opts.maxTokens || this.maxTokens,
 			messages: [...this.history],
 			...(this._buildSystemParam() && { system: this._buildSystemParam() }),
-			...(this.topK !== undefined && { top_k: this.topK }),
 			...(tools && { tools }),
 			...(opts.tool_choice && { tool_choice: opts.tool_choice }),
 		};
 
-		if (this.thinking) {
-			params.thinking = this.thinking;
-		} else {
-			// Vertex AI doesn't allow both temperature and topP
-			if (this.vertexai && this.temperature !== undefined && this.topP !== undefined) {
-				// Prefer temperature, skip topP for Vertex AI
-				params.temperature = this.temperature;
-				log.debug('Vertex AI: Using temperature only (topP ignored)');
-			} else {
-				if (this.temperature !== undefined) params.temperature = this.temperature;
-				if (this.topP !== undefined) params.top_p = this.topP;
-			}
-		}
+		this._applyThinkingParams(params, model);
+		this._applySamplingParams(params, model);
 
 		const stream = this.client.messages.stream(params);
 		return stream;
@@ -506,7 +797,7 @@ class BaseClaude {
 	async clearHistory() {
 		this.history = [];
 		this.lastResponseMetadata = null;
-		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 0 };
+		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
 		log.debug(`${this.constructor.name}: Conversation history cleared.`);
 	}
 
@@ -623,7 +914,7 @@ class BaseClaude {
 		if (!this.lastResponseMetadata) return null;
 
 		const meta = this.lastResponseMetadata;
-		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, totalTokens: 0, attempts: 1 };
+		const cumulative = this._cumulativeUsage || { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 1 };
 		const useCumulative = cumulative.attempts > 0;
 
 		const promptTokens = useCumulative ? cumulative.promptTokens : meta.promptTokens;
@@ -661,8 +952,9 @@ class BaseClaude {
 	 * @protected
 	 */
 	_estimatedCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens = 0, cacheReadTokens = 0) {
-		return computeCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens)
-			?? computeCost(this.modelName, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens);
+		const opts = { cacheTtl: /** @type {'5m'|'1h'} */ (this.cacheTtl) };
+		return computeCost(modelVersion, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens, opts)
+			?? computeCost(this.modelName, promptTokens, responseTokens, cacheCreationTokens, cacheReadTokens, opts);
 	}
 
 	/**
