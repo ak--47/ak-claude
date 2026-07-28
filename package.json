@@ -19,7 +19,8 @@
 		"types.d.ts",
 		"logger.js",
 		"GUIDE.md",
-		"CHANGELOG.md"
+		"UPGRADING.md",
+    "CHANGELOG.md"
 	],
 	"types": "types.d.ts",
 	"exports": {

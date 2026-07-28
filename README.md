@@ -685,6 +685,13 @@ All tests use real Anthropic API calls (no mocks). Rate limiting (429 errors) ca
 
 ---
 
+## Upgrading
+
+**Upgrading from 0.1.0 to 0.2.0?** See [UPGRADING.md](./UPGRADING.md). 0.2.0 makes the
+Claude 5 family usable (`temperature` / `top_p` / `top_k` and `thinking.budget_tokens`
+all 400 there and are now handled for you), adds the `effort` option, and prices cache
+tokens. Full detail in [CHANGELOG.md](./CHANGELOG.md).
+
 ## Migration from ak-gemini
 
 See [MIGRATION.md](./MIGRATION.md) for a detailed guide on migrating from ak-gemini to ak-claude.

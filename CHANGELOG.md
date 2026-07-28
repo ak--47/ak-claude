@@ -2,6 +2,9 @@
 
 ## 0.2.0
 
+> **Upgrading from 0.1.0?** [UPGRADING.md](./UPGRADING.md) walks through only what you
+> need to change, with before/after examples.
+
 Feature request from a downstream consumer (`smarterchild/agent`, Vertex AI).
 **Minor** bump — the Claude 5-family parameter gating changes what goes on the
 wire (see "Behavior changes" below).
