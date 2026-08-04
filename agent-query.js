@@ -49,7 +49,7 @@ class AgentQuery {
 	 * @param {AgentQueryOptions} [options={}]
 	 */
 	constructor(options = {}) {
-		this.model = options.model || 'claude-sonnet-4-6';
+		this.model = options.model || 'claude-sonnet-5';
 		this.allowedTools = options.allowedTools || undefined;
 		this.disallowedTools = options.disallowedTools || undefined;
 		this.cwd = options.cwd || process.cwd();

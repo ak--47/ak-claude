@@ -106,7 +106,7 @@ export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' |
 // ── Constructor Options ──────────────────────────────────────────────────────
 
 export interface BaseClaudeOptions {
-  /** Claude model to use (default: 'claude-sonnet-4-6') */
+  /** Claude model to use (default: 'claude-sonnet-5') */
   modelName?: string;
   /** System prompt for the model (null or false to disable) */
   systemPrompt?: string | null | false;
@@ -345,7 +345,7 @@ export interface CodeAgentOptions extends BaseClaudeOptions {
 }
 
 export interface AgentQueryOptions {
-  /** Model to use (default: 'claude-sonnet-4-6') */
+  /** Model to use (default: 'claude-sonnet-5') */
   model?: string;
   /** Allowed tools list (e.g., ['Read', 'Glob', 'Grep']) */
   allowedTools?: string[];

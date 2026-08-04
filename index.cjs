@@ -472,7 +472,7 @@ var BaseClaude = class {
    * @param {BaseClaudeOptions} [options={}]
    */
   constructor(options = {}) {
-    this.modelName = options.modelName || "claude-sonnet-4-6";
+    this.modelName = options.modelName || "claude-sonnet-5";
     if (options.systemPrompt !== void 0) {
       this.systemPrompt = options.systemPrompt;
     } else {
@@ -3356,7 +3356,7 @@ var AgentQuery = class {
    * @param {AgentQueryOptions} [options={}]
    */
   constructor(options = {}) {
-    this.model = options.model || "claude-sonnet-4-6";
+    this.model = options.model || "claude-sonnet-5";
     this.allowedTools = options.allowedTools || void 0;
     this.disallowedTools = options.disallowedTools || void 0;
     this.cwd = options.cwd || process.cwd();

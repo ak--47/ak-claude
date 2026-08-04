@@ -14,7 +14,7 @@ const prompt = process.argv.slice(2).join(' ');
 
 if (!prompt || prompt === '-h' || prompt === '--help') {
 	console.log('Usage: node ak-claude/cli.js "your prompt"');
-	console.log('  MODEL env var overrides default model (claude-sonnet-4-6)');
+	console.log('  MODEL env var overrides default model (claude-sonnet-5)');
 	console.log('  Web search is enabled by default');
 	process.exit(prompt ? 0 : 1);
 }
@@ -22,7 +22,7 @@ if (!prompt || prompt === '-h' || prompt === '--help') {
 try {
 	const enableSearch = process.env.WEB_SEARCH === '1';
 	const msg = new Message({
-		modelName: process.env.MODEL || 'claude-sonnet-4-6',
+		modelName: process.env.MODEL || 'claude-sonnet-5',
 		...(enableSearch && { enableWebSearch: true }),
 		vertexai: true,
 		vertexProjectId: process.env.GOOGLE_CLOUD_PROJECT || 'mixpanel-gtm-training',

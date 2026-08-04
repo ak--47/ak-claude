@@ -13,7 +13,7 @@ This guide covers everything you need to change when switching from `ak-gemini` 
 | Package | `ak-gemini` | `ak-claude` |
 | SDK dependency | `@google/genai` | `@anthropic-ai/sdk` |
 | Base class | `BaseGemini` | `BaseClaude` |
-| Default model | `gemini-2.5-flash` | `claude-sonnet-4-6` |
+| Default model | `gemini-3.6-flash` | `claude-sonnet-5` |
 | API key env var | `GEMINI_API_KEY` | `ANTHROPIC_API_KEY` (or `CLAUDE_API_KEY`) |
 | Transformer | `Transformer` | `Transformer` |
 | Chat | `Chat` | `Chat` |
@@ -49,8 +49,8 @@ export GEMINI_API_KEY=your-key          export ANTHROPIC_API_KEY=your-key
 ### Step 3: Change the model name (or omit it)
 
 ```javascript
-new Chat({ modelName: 'gemini-2.5-flash' });  // ak-gemini default
-new Chat({ modelName: 'claude-sonnet-4-6' });  // ak-claude default
+new Chat({ modelName: 'gemini-3.6-flash' });  // ak-gemini default
+new Chat({ modelName: 'claude-sonnet-5' });  // ak-claude default
 new Chat({ systemPrompt: 'Hello.' });          // both — omit to use default
 ```
 
@@ -68,7 +68,7 @@ Most constructor options are shared. The table below covers the differences.
 
 | ak-gemini | ak-claude | Notes |
 |---|---|---|
-| `modelName` | `modelName` | Different defaults: `gemini-2.5-flash` vs `claude-sonnet-4-6` |
+| `modelName` | `modelName` | Different defaults: `gemini-3.6-flash` vs `claude-sonnet-5` |
 | `systemPrompt` | `systemPrompt` | Same |
 | `apiKey` | `apiKey` | Different env var fallback |
 | `maxOutputTokens` | `maxTokens` | **Renamed.** Gemini default: 50000. Claude default: 8192 |
@@ -397,7 +397,7 @@ async function createAI(provider, options = {}) {
   if (provider === 'claude') {
     const { Chat } = await import('ak-claude');
     return new Chat({
-      modelName: options.model || 'claude-sonnet-4-6',
+      modelName: options.model || 'claude-sonnet-5',
       systemPrompt: options.systemPrompt,
       apiKey: options.apiKey || process.env.ANTHROPIC_API_KEY,
     });
@@ -429,7 +429,7 @@ class AIAdapter {
     const isGemini = this.provider === 'gemini';
     const mod = isGemini ? await import('ak-gemini') : await import('ak-claude');
     this._instance = new mod.Chat({
-      modelName: this._options.model || (isGemini ? 'gemini-2.5-flash' : 'claude-sonnet-4-6'),
+      modelName: this._options.model || (isGemini ? 'gemini-3.6-flash' : 'claude-sonnet-5'),
       systemPrompt: this._options.systemPrompt,
       ...(isGemini
         ? { maxOutputTokens: this._options.maxTokens, enableGrounding: this._options.webSearch }
