@@ -1,9 +1,9 @@
 # Changelog
 
-## 0.3.0
+## 0.2.1
 
-**Minor** bump — the default model changes what goes on the wire when you don't
-pass `modelName` (see below). No API-surface changes. Paired with ak-gemini 2.7.0.
+**Patch** bump — the default model changes what goes on the wire when you don't
+pass `modelName` (see below). No API-surface changes. Paired with ak-gemini 2.6.1.
 
 ### Behavior changes (read before upgrading)
 - **Default model is now `claude-sonnet-5`** (was `claude-sonnet-4-6`) — on every

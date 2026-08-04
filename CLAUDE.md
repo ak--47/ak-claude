@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-claude** (v0.3.0) is a modular wrapper around Anthropic's `@anthropic-ai/sdk`. It provides 7 class exports for different AI interaction patterns (6 extending a shared `BaseClaude` base class) plus a standalone `AgentQuery` class that wraps the Claude Agent SDK.
+**ak-claude** (v0.2.1) is a modular wrapper around Anthropic's `@anthropic-ai/sdk`. It provides 7 class exports for different AI interaction patterns (6 extending a shared `BaseClaude` base class) plus a standalone `AgentQuery` class that wraps the Claude Agent SDK.
 
 ## Architecture
 
