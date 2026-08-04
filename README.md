@@ -561,7 +561,7 @@ All classes (except AgentQuery) accept `BaseClaudeOptions`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `modelName` | string | `'claude-sonnet-4-6'` | Claude model to use |
+| `modelName` | string | `'claude-sonnet-5'` | Claude model to use |
 | `systemPrompt` | string | varies by class | System prompt |
 | `apiKey` | string | env var | Anthropic API key (not needed with `vertexai`) |
 | `vertexai` | boolean | `false` | Use Vertex AI auth (Application Default Credentials) |
@@ -644,7 +644,7 @@ All classes (except AgentQuery) accept `BaseClaudeOptions`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `model` | string | `'claude-sonnet-4-6'` | Model to use |
+| `model` | string | `'claude-sonnet-5'` | Model to use |
 | `allowedTools` | array | — | Allowed tools (e.g., `['Read', 'Glob', 'Grep']`) |
 | `disallowedTools` | array | — | Disallowed tools |
 | `cwd` | string | `process.cwd()` | Working directory |

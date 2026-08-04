@@ -216,7 +216,8 @@ describe('consumer-fixes (ak-claude)', () => {
 	// ── S4: Vertex temperature + top_p guard ──
 	describe('S4 Message on Vertex does not send temperature + top_p together', () => {
 		it('sends temperature only', async () => {
-			const msg = new Message({ ...KEY, topP: 0.9 });
+			// pin pre-5 model: the default (claude-sonnet-5) drops sampling params entirely
+			const msg = new Message({ ...KEY, modelName: 'claude-sonnet-4-6', topP: 0.9 });
 			msg.vertexai = true;      // force Vertex guard
 			msg._initialized = true;
 			const create = jest.fn(async () => textResponse('r', 1, 1));

@@ -54,7 +54,7 @@ import AI from 'ak-claude';
 const t = new AI.Transformer({ ... });
 ```
 
-The default model is `claude-sonnet-4-6`. Override with `modelName`:
+The default model is `claude-sonnet-5`. Override with `modelName`:
 
 ```javascript
 new Chat({ modelName: 'claude-opus-4-6' });
@@ -85,7 +85,7 @@ When `vertexai: true`, the Anthropic client is created lazily using `@anthropic-
 
 **Region precedence:** `vertexRegion` option > `GOOGLE_CLOUD_LOCATION` env var > `'global'` (default). The resolved region is logged at debug on client construction.
 
-**Which region?** `'global'` is the recommended default — it routes dynamically, serves the current Claude 5-family models (`claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-4-7`), and carries no 10% regional premium. Specific regional endpoints (e.g. `us-east5`) only serve **Claude Sonnet 4.6 and earlier** — set one explicitly only if you need data residency, and expect a warning if you pair one with a Claude 5-family model. Multi-region endpoints (`'us'`, `'eu'`) also serve the newer models.
+**Which region?** `'global'` is the recommended default — it routes dynamically, serves the current Claude 5-family models (`claude-sonnet-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`), and carries no 10% regional premium. Specific regional endpoints (e.g. `us-east5`) only serve **Claude Sonnet 4.6 and earlier** — set one explicitly only if you need data residency, and expect a warning if you pair one with a Claude 5-family model. Multi-region endpoints (`'us'`, `'eu'`) also serve the newer models.
 
 ### API Key (direct Anthropic API)
 
@@ -1159,8 +1159,10 @@ app.post('/classify', async (req, res) => {
 | Model | Speed | Cost | Best For |
 |---|---|---|---|
 | `claude-haiku-4-5-20251001` | Fastest | Cheapest | Classification, extraction, simple tasks |
-| `claude-sonnet-4-6` | Fast | Medium | General purpose, good quality (default) |
-| `claude-opus-4-6` | Slower | Highest | Complex reasoning, code, deep analysis |
+| `claude-sonnet-5` | Fast | Medium | General purpose, good quality (default) |
+| `claude-sonnet-4-6` | Fast | Medium | Previous-generation Sonnet |
+| `claude-opus-5` | Slower | Highest | Complex reasoning, code, deep analysis |
+| `claude-opus-4-6` | Slower | Highest | Previous-generation Opus |
 
 ### Use `Message` for Stateless Workloads
 
@@ -1485,6 +1487,8 @@ const { Transformer, Chat } = require('ak-claude');
 
 | Model | Input | Output |
 |---|---|---|
-| `claude-haiku-4-5-20251001` | $0.80 | $4.00 |
+| `claude-haiku-4-5-20251001` | $1.00 | $5.00 |
+| `claude-sonnet-5` | $3.00 ($2.00 intro through 2026-08-31) | $15.00 ($10.00 intro) |
 | `claude-sonnet-4-6` | $3.00 | $15.00 |
-| `claude-opus-4-6` | $15.00 | $75.00 |
+| `claude-opus-5` | $5.00 | $25.00 |
+| `claude-opus-4-6` | $5.00 | $25.00 |

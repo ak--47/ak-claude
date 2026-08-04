@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0
+
+**Minor** bump — the default model changes what goes on the wire when you don't
+pass `modelName` (see below). No API-surface changes. Paired with ak-gemini 2.7.0.
+
+### Behavior changes (read before upgrading)
+- **Default model is now `claude-sonnet-5`** (was `claude-sonnet-4-6`) — on every
+  `BaseClaude`-derived class, `AgentQuery`, and the CLI. Pass
+  `modelName: 'claude-sonnet-4-6'` to keep the old default. What the new default
+  implies (all machinery shipped in 0.2.0):
+  - `temperature` / `top_p` / `top_k` are dropped on the wire by the Claude
+    5-family gate (Sonnet 5 returns a hard 400 on them; logged at debug).
+  - Legacy `thinking: { type: 'enabled', budget_tokens: N }` is auto-translated
+    to `thinking: { type: 'adaptive' }` + `output_config: { effort }`.
+  - Pricing: $3/$15 per M, with the $2/$10 intro rate date-windowed through
+    2026-08-31 in `MODEL_PRICING`.
+  - Verified live on Vertex AI (default region `global`, served under the bare
+    first-party id).
+
+### Changed
+- **`@anthropic-ai/sdk` `^0.112.2` → `^0.115.0`.** Changelog-audited: additive
+  only, no breaking changes affecting the wrapper.
+
+### Notes
+- **`claude-opus-5` verified live on Vertex AI** (priced in `MODEL_PRICING`
+  since 0.2.0, $5/$25 per M). It responded via the `us` multi-region endpoint;
+  a freshly enabled project may 429 (`RESOURCE_EXHAUSTED`) on `global` until
+  the per-base-model quota bucket is provisioned — pass `vertexRegion: 'us'`
+  in the meantime.
+- GUIDE model/pricing tables updated: added `claude-opus-5` and corrected the
+  stale `claude-opus-4-6` ($5/$25, not $15/$75) and `claude-haiku-4-5`
+  ($1/$5, not $0.80/$4) rows to match `MODEL_PRICING`.
+
 ## 0.2.0
 
 > **Upgrading from 0.1.0?** [UPGRADING.md](./UPGRADING.md) walks through only what you

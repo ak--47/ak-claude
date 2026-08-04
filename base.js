@@ -222,7 +222,7 @@ class BaseClaude {
 	 */
 	constructor(options = {}) {
 		// ── Model ──
-		this.modelName = options.modelName || 'claude-sonnet-4-6';
+		this.modelName = options.modelName || 'claude-sonnet-5';
 
 		// ── System Prompt ──
 		if (options.systemPrompt !== undefined) {
