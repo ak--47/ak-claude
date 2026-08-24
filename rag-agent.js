@@ -211,16 +211,9 @@ class RagAgent extends BaseClaude {
 	async chat(message, opts = {}) {
 		if (!this._initialized) await this.init();
 
+		this._resetUsage();
 		const response = await this._sendMessage(message, opts);
-
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
-			cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
+		this._accumulateUsage(response);
 
 		const result = {
 			text: this._extractText(response),
@@ -271,6 +264,7 @@ class RagAgent extends BaseClaude {
 		if (!this._initialized) await this.init();
 
 		let fullText = '';
+		this._resetUsage();
 		const stream = await this._streamMessage(message, opts);
 		const finalMessage = await stream.finalMessage();
 
@@ -283,7 +277,7 @@ class RagAgent extends BaseClaude {
 
 		// Push assistant response to history
 		this.history.push({ role: 'assistant', content: finalMessage.content });
-		this._captureMetadata(finalMessage);
+		this._accumulateUsage(finalMessage);
 
 		yield {
 			type: 'done',

@@ -26,6 +26,13 @@ Do not wrap your response in markdown code blocks.
 `;
 
 /**
+ * Appended to the original task when a previous attempt returned output that
+ * could not be parsed as JSON. The failed response is already in the message
+ * history, so this only needs to correct the format — not restate the task.
+ */
+const EXTRACTION_RETRY_NUDGE = `Your previous response could not be parsed as JSON. Respond with a single valid JSON object and NOTHING else — no prose, no explanations, no markdown code fences.`;
+
+/**
  * @typedef {import('./types').TransformerOptions} TransformerOptions
  * @typedef {import('./types').AsyncValidatorFunction} AsyncValidatorFunction
  * @typedef {import('./types').TransformationExample} TransformationExample
@@ -168,18 +175,33 @@ class Transformer extends BaseClaude {
 		const retryDelay = opts.retryDelay ?? this.retryDelay;
 
 		// Prepare the payload
-		let lastPayload = this._preparePayload(payload);
+		const originalPayload = this._preparePayload(payload);
 
 		// Reset cumulative usage tracking
 		this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
 
 		let lastError = null;
+		// The payload the MODEL produced, when it produced a parseable one. Stays
+		// null after an extraction failure — there is nothing to repair.
+		let lastModelOutput = null;
 
 		for (let attempt = 0; attempt <= maxRetries; attempt++) {
 			try {
-				const transformedPayload = (attempt === 0)
-					? await this.rawSend(lastPayload)
-					: await this.rebuild(lastPayload, lastError.message);
+				let transformedPayload;
+				if (attempt === 0) {
+					transformedPayload = await this.rawSend(originalPayload);
+				} else if (lastModelOutput !== null) {
+					// Validation failure: the model produced parseable output that the
+					// validator rejected. Repair the payload it actually returned.
+					transformedPayload = await this.rebuild(lastModelOutput, lastError.message);
+				} else {
+					// Extraction failure: the model returned something unparseable, so
+					// there is no bad payload to repair. rebuild() would hand it the
+					// ORIGINAL INPUT labelled "BAD PAYLOAD" (double-encoded, since
+					// _preparePayload already stringified it) — re-send the task with a
+					// format nudge instead.
+					transformedPayload = await this.rawSend(`${originalPayload}\n\n${EXTRACTION_RETRY_NUDGE}`);
+				}
 
 				// Accumulate token usage
 				if (this.lastResponseMetadata) {
@@ -191,11 +213,16 @@ class Transformer extends BaseClaude {
 					this._cumulativeUsage.attempts = attempt + 1;
 				}
 
-				lastPayload = transformedPayload;
-
 				// Validate
 				if (validator) {
-					await validator(transformedPayload);
+					try {
+						await validator(transformedPayload);
+					} catch (validationError) {
+						// Tag it so the next attempt repairs this payload rather than
+						// treating the failure as an extraction problem.
+						validationError._akValidationPayload = transformedPayload;
+						throw validationError;
+					}
 				}
 
 				log.debug(`Transformation succeeded on attempt ${attempt + 1}`);
@@ -203,6 +230,7 @@ class Transformer extends BaseClaude {
 
 			} catch (error) {
 				lastError = error;
+				lastModelOutput = '_akValidationPayload' in error ? error._akValidationPayload : null;
 				log.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
 
 				if (attempt >= maxRetries) {
@@ -241,13 +269,7 @@ class Transformer extends BaseClaude {
 				log.debug(`API response: model=${response.model || 'unknown'}, tokens=${response.usage.input_tokens + response.usage.output_tokens}`);
 			}
 
-			const extractedJSON = extractJSON(modelResponse);
-
-			// Unwrap the 'data' property if it exists
-			if (extractedJSON?.data) {
-				return extractedJSON.data;
-			}
-			return extractedJSON;
+			return this._parseModelResponse(modelResponse);
 
 		} catch (error) {
 			if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
@@ -255,6 +277,26 @@ class Transformer extends BaseClaude {
 			}
 			throw new Error(`Transformation failed: ${error.message}`);
 		}
+	}
+
+	// ── Response Parsing ─────────────────────────────────────────────────────
+
+	/**
+	 * Turns raw model text into the transformed payload.
+	 *
+	 * Shared by `rawSend()`, `rebuild()` and `_statelessSend()` so all three apply
+	 * the SAME two steps: `extractJSON()` and the `{data: …}` unwrap that seeded
+	 * Transformers need — `seed()` always uses `format: 'json'`, which trains the
+	 * model to answer in that envelope. `rebuild()` used to skip the unwrap, so it
+	 * returned `{data: payload}` where attempt 0 returned `payload`.
+	 *
+	 * @param {string} modelResponse - Raw text from the model
+	 * @returns {Object} The transformed payload
+	 * @protected
+	 */
+	_parseModelResponse(modelResponse) {
+		const extracted = extractJSON(modelResponse);
+		return extracted?.data ? extracted.data : extracted;
 	}
 
 	// ── Rebuild ──────────────────────────────────────────────────────────────
@@ -291,8 +333,7 @@ Respond with JSON only – no comments or explanations.
 		}
 
 		try {
-			const text = this._extractText(response);
-			return extractJSON(text);
+			return this._parseModelResponse(this._extractText(response));
 		} catch (parseErr) {
 			throw new Error(`Claude returned non-JSON while repairing payload: ${parseErr.message}`);
 		}
@@ -348,9 +389,7 @@ Respond with JSON only – no comments or explanations.
 			attempts: 1
 		};
 
-		const modelResponse = this._extractText(response);
-		const extractedJSON = extractJSON(modelResponse);
-		let transformedPayload = extractedJSON?.data ? extractedJSON.data : extractedJSON;
+		let transformedPayload = this._parseModelResponse(this._extractText(response));
 
 		if (validatorFn) {
 			await validatorFn(transformedPayload);

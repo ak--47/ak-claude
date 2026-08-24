@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.3.0
+
+Parity pass against the ak-gemini 2.7.0 defect sweep. A downstream consumer
+audited ak-gemini and found nine defects; five of them have real analogues here,
+and the pricing table had two errors of its own. Paired with ak-gemini 2.7.0.
+
+**Minor** bump — reported token counts and `estimatedCost` change (in both
+directions, to the truth) and `Transformer.send()` retry behavior changes. No
+signatures removed.
+
+### Behavior changes (read before upgrading)
+
+- **`claude-sonnet-5` no longer jumps to $3/$15 on 2026-09-01.** The $2/$10
+  launch rate was announced as introductory through 2026-08-31; Anthropic has
+  since made it the standard price and cancelled the increase. It was modelled
+  as an `intro` block, so from 2026-09-01 every Sonnet 5 cost estimate would
+  have been 50% high — on the default model. Now flat $2/$10. **This is the
+  reason to take 0.3.0 before September.**
+- **`claude-opus-4-5` was priced at $15/$75; the actual rate is $5/$25.**
+  Estimates for it were 3× high. Corrected, along with the dated
+  `claude-opus-4-5-20250514` variant.
+- **Multi-round and streaming usage numbers change, because they were wrong.**
+  See "Fixed". Anything asserting exact token counts from a `ToolAgent` /
+  `CodeAgent` turn will need updating.
+- **`usage.attempts` on the agent classes** is now the number of API
+  round-trips in the turn (was hardcoded `1`).
+
+### Fixed
+
+- **`stream()` reported the previous call's tokens.** Streaming methods called
+  `_captureMetadata()` but never touched `_cumulativeUsage`, and
+  `getLastUsage()` prefers the cumulative whenever `attempts > 0`. So a
+  `stream()` after any `send()` / `chat()` on the same instance reported that
+  earlier call's numbers as if fresh. Fixed in `Chat`, `RagAgent`, `ToolAgent`
+  and `CodeAgent`.
+- **Multi-round tool turns reported one round.** `ToolAgent.chat()`,
+  `CodeAgent.chat()` and both `stream()` loops assigned usage from the FINAL
+  response. Because `promptTokens` grows with accumulated history, the final
+  round is the largest single call — the number looked plausible while
+  undercounting the turn several-fold. Now accumulated per round.
+- **`Transformer.rebuild()` skipped the `{data: …}` unwrap** that `rawSend()`
+  performs. `seed()` always uses `format: 'json'`, which trains the model to
+  answer in that envelope — so attempt 0 returned `payload` and attempt ≥1
+  returned `{data: payload}`. With a validator that is a guaranteed
+  retry-exhaustion loop. `rawSend()`, `rebuild()` and `_statelessSend()` now
+  share `_parseModelResponse()`.
+- **`send()` retried against the original input.** `lastPayload` only advanced
+  on success, so when attempt 0 failed to PARSE, attempt 1 called
+  `rebuild(ORIGINAL_INPUT, …)` — telling the model its own input was the bad
+  output, double-encoded because `_preparePayload` had already stringified it.
+  Extraction and validation failures are now distinguished: extraction failures
+  re-send the task with a format nudge; validation failures still repair the
+  payload the model actually produced.
+- **`stop()` mid-round produced a malformed turn.** A `stop()` landing partway
+  through `ToolAgent.stream()`'s sequential branch left `toolResults` short, and
+  the partial set was still sent — Claude requires exactly one `tool_result` per
+  `tool_use` block, so that was a 400. It now bails out before the send.
+
+### Added
+
+- Protected `BaseClaude` helpers `_resetUsage()` and `_accumulateUsage()`,
+  mirroring ak-gemini's.
+- `claude-opus-4-1`, `claude-opus-4`, `claude-sonnet-4` and `claude-haiku-3-5`
+  in `MODEL_PRICING`. Retired on the direct API but still served on Bedrock and
+  Vertex AI, which this package supports — `estimatedCost` was `null` there.
+- 6 offline regression tests in `tests/consumer-fixes.test.js` (56 total).
+
+### Not affected (checked)
+
+The other four ak-gemini defects do not apply here, for architectural reasons
+worth recording:
+
+- **Chunk-loop text loss / `parts[0]` truncation** — ak-claude reads
+  `finalMessage.content` and iterates every block, so text and `tool_use` in the
+  same response both survive.
+- **Stateless paths ignoring grounding / caching** — `_sendMessage` and
+  `_streamMessage` are the single param builders and both call `_buildTools()`
+  and `_buildSystemParam()`, so web search and `cacheSystemPrompt` reach every
+  path uniformly.
+- **`useCache()` destroying the system instruction** — no cache CRUD here;
+  Anthropic manages cache lifecycle server-side.
+
+### Changed
+
+- **`@anthropic-ai/sdk` `^0.115.0` → `^0.120.0`.** Changelog-audited across
+  0.116.0–0.120.0. The removals (retired Opus 4.1 model ids, the
+  `mid_conv_system` content block) touch no code here. The 0.117.0 change that
+  applies all `message_delta` fields during stream accumulation makes
+  `finalMessage()` usage MORE accurate, which is the same direction as the
+  streaming fixes above.
+- `MODEL_PRICING_AS_OF` → `2026-08-24`.
+
 ## 0.2.1
 
 **Patch** bump — the default model changes what goes on the wire when you don't

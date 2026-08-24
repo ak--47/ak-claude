@@ -21,7 +21,7 @@ import { isJSON } from './json-helpers.js';
 const DEFAULT_MAX_TOKENS = 8192;
 
 /** Date the pricing table below was last verified against Anthropic's pricing page. */
-const MODEL_PRICING_AS_OF = '2026-07-28';
+const MODEL_PRICING_AS_OF = '2026-08-24';
 
 /**
  * Model pricing per million tokens (as of MODEL_PRICING_AS_OF).
@@ -40,23 +40,30 @@ const MODEL_PRICING = {
 	'claude-fable-5': { input: 10.00, output: 50.00 },
 	'claude-mythos-5': { input: 10.00, output: 50.00 }, // Project Glasswing only
 	'claude-opus-5': { input: 5.00, output: 25.00 },
-	'claude-sonnet-5': {
-		input: 3.00, output: 15.00,
-		intro: { input: 2.00, output: 10.00, until: '2026-08-31' }
-	},
+	// Sonnet 5's $2/$10 launch rate was announced as introductory through
+	// 2026-08-31, but Anthropic has since made it the standard price and
+	// cancelled the scheduled rise to $3/$15. Modelled flat — NOT as an `intro`
+	// block, which would have started overcharging 50% on 2026-09-01.
+	'claude-sonnet-5': { input: 2.00, output: 10.00 },
 	// Opus 4.x
 	'claude-opus-4-8': { input: 5.00, output: 25.00 },
 	'claude-opus-4-7': { input: 5.00, output: 25.00 },
 	'claude-opus-4-6': { input: 5.00, output: 25.00 },
-	'claude-opus-4-5': { input: 15.00, output: 75.00 },
-	'claude-opus-4-5-20250514': { input: 15.00, output: 75.00 },
+	'claude-opus-4-5': { input: 5.00, output: 25.00 },
+	'claude-opus-4-5-20250514': { input: 5.00, output: 25.00 },
+	// Retired on the direct API but still served on Bedrock / Vertex AI, which
+	// ak-claude supports — priced so estimatedCost stays non-null there.
+	'claude-opus-4-1': { input: 15.00, output: 75.00 },
+	'claude-opus-4': { input: 15.00, output: 75.00 },
 	// Sonnet 4.x
 	'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
 	'claude-sonnet-4-5': { input: 3.00, output: 15.00 },
 	'claude-sonnet-4-5-20250514': { input: 3.00, output: 15.00 },
+	'claude-sonnet-4': { input: 3.00, output: 15.00 },
 	// Haiku
 	'claude-haiku-4-5': { input: 1.00, output: 5.00 },
 	'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
+	'claude-haiku-3-5': { input: 0.80, output: 4.00 },
 };
 
 /**
@@ -903,6 +910,54 @@ class BaseClaude {
 			stopReason: response.stop_reason || null,
 			timestamp: Date.now()
 		};
+	}
+
+	/**
+	 * Zeroes the cumulative usage counters. Call once at the start of any method
+	 * that makes one or more API round-trips, before the first `_accumulateUsage()`.
+	 *
+	 * Streaming methods must call this too: `getLastUsage()` prefers
+	 * `_cumulativeUsage` whenever `attempts > 0`, so a `stream()` that only calls
+	 * `_captureMetadata()` reports the token counts of whatever `send()` or
+	 * `chat()` ran before it on the same instance.
+	 *
+	 * @protected
+	 */
+	_resetUsage() {
+		this._cumulativeUsage = {
+			promptTokens: 0, responseTokens: 0,
+			cacheCreationTokens: 0, cacheReadTokens: 0,
+			totalTokens: 0, attempts: 0
+		};
+	}
+
+	/**
+	 * Captures metadata from `response` and ADDS its token counts to the running
+	 * cumulative total. Call once per API round-trip.
+	 *
+	 * Multi-round methods (agent tool loops) make several calls per turn;
+	 * assigning from the final response only — as the tool loops used to —
+	 * reports the last round and undercounts the turn several-fold, because
+	 * `promptTokens` grows with the accumulated history so the final round looks
+	 * plausibly large on its own.
+	 *
+	 * `attempts` becomes the number of API round-trips in the turn.
+	 *
+	 * @param {Object} response - A single messages.create()/finalMessage() response
+	 * @protected
+	 */
+	_accumulateUsage(response) {
+		this._captureMetadata(response);
+		if (!this._cumulativeUsage) this._resetUsage();
+
+		const meta = this.lastResponseMetadata;
+		const cumulative = this._cumulativeUsage;
+		cumulative.promptTokens += meta.promptTokens || 0;
+		cumulative.responseTokens += meta.responseTokens || 0;
+		cumulative.cacheCreationTokens += meta.cacheCreationTokens || 0;
+		cumulative.cacheReadTokens += meta.cacheReadTokens || 0;
+		cumulative.totalTokens += meta.totalTokens || 0;
+		cumulative.attempts += 1;
 	}
 
 	/**
