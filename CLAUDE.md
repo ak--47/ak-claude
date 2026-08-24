@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Module Overview
 
-**ak-claude** (v0.2.1) is a modular wrapper around Anthropic's `@anthropic-ai/sdk`. It provides 7 class exports for different AI interaction patterns (6 extending a shared `BaseClaude` base class) plus a standalone `AgentQuery` class that wraps the Claude Agent SDK.
+**ak-claude** (v0.3.0) is a modular wrapper around Anthropic's `@anthropic-ai/sdk`. It provides 7 class exports for different AI interaction patterns (6 extending a shared `BaseClaude` base class) plus a standalone `AgentQuery` class that wraps the Claude Agent SDK.
 
 ## Architecture
 
@@ -77,7 +77,8 @@ Shared foundation. Not typically instantiated directly.
 - `seed(examples, opts?)` — Add example pairs to chat history for few-shot learning
 - `getHistory(curated?)` / `clearHistory()` — Manage chat history. `curated: true` returns text-only simplified history
 - `getLastUsage()` — Structured usage data after API calls (includes `cacheCreationTokens`, `cacheReadTokens`, and `estimatedCost` from MODEL_PRICING — `null` if unpriced). Reflects the instance's LAST call; unsafe under concurrent `send()`s — prefer the per-call `result.usage` (computed synchronously from that response via `_usageFromResponse()`)
-- `resolvePricing(modelId)` / `computeCost(modelId, in, out)` — pricing helpers; handle Vertex dated snapshots (`model@YYYYMMDD`), return `null` for unknown models (exported from index)
+- `resolvePricing(modelId, { at? })` / `computeCost(modelId, in, out, cacheWrite?, cacheRead?, { at?, cacheTtl? })` — pricing helpers; handle Vertex dated snapshots (`model@YYYYMMDD`), return `null` for unknown models (exported from index)
+- `_resetUsage()` / `_accumulateUsage(response)` — **the only correct way to record usage.** Call `_resetUsage()` once at the top of any method making API calls, then `_accumulateUsage()` after EVERY round-trip. Assigning `_cumulativeUsage` from the final response reports one round of a multi-round turn; omitting it entirely in a `stream()` makes `getLastUsage()` return the *previous* call's numbers, because it prefers the cumulative whenever `attempts > 0`
 - `estimate(payload)` / `estimateCost(payload)` — Token/cost estimation via `messages.countTokens()`
 - `listModels()` — List all available models from the Anthropic API (direct API only, not Vertex AI)
 - `getModel(modelId)` — Get detailed information about a specific model (direct API only, not Vertex AI)
@@ -429,7 +430,7 @@ Configurable key mappings: `promptKey` (default: 'PROMPT'), `answerKey` (default
 - `estimateCost()` — cost estimate using `MODEL_PRICING` table in `base.js`
 - MODEL_PRICING covers the Claude 5 family (fable/mythos/opus-5/sonnet-5/opus-4-8/opus-4-7), 4.6, 4.5, and Haiku 4.5 (plus dated variants). `MODEL_PRICING_AS_OF` records when the table was last verified
 - **`null` cost means UNKNOWN, not free.** `resolvePricing()` / `usage.estimatedCost` return `null` for unpriced models
-- Sonnet 5 bills at an introductory $2/$10 per M through 2026-08-31, then $3/$15 — modelled as an `intro` block on the table entry. `resolvePricing(id, { at })` / `computeCost(..., { at })` accept an explicit date
+- Sonnet 5 bills at a flat $2/$10 per M. The launch rate was announced as introductory through 2026-08-31, but Anthropic made it permanent and cancelled the rise to $3/$15 — do NOT re-add an `intro` block for it. The `intro: { input, output, until }` mechanism itself is retained (no model uses it today); `resolvePricing(id, { at })` / `computeCost(..., { at })` accept an explicit date
 - Anthropic **excludes** cache tokens from `input_tokens` — they are billed on top (write 1.25× input at 5m TTL, **2× at 1h** via `cacheTtl: '1h'`; read 0.1×). ak-gemini is the opposite (its `promptTokenCount` includes cached tokens and they are subtracted). Do not "unify" the two
 - **Sonnet 5's tokenizer produces ~30% more tokens than Sonnet 4.6** for the same text. `estimate()` uses `countTokens()` and stays accurate; local character heuristics do not
 

@@ -175,8 +175,10 @@ class ToolAgent extends BaseClaude {
 
 		const allToolCalls = [];
 
+		this._resetUsage();
 		const toolChoice = this._buildToolChoice();
 		let response = await this._sendMessage(message, { tools: this.tools, ...(toolChoice && { tool_choice: toolChoice }) });
+		this._accumulateUsage(response);
 
 		for (let round = 0; round < this.maxToolRounds; round++) {
 			if (this._stopped) break;
@@ -227,17 +229,8 @@ class ToolAgent extends BaseClaude {
 
 			// Send tool results back to Claude as user message
 			response = await this._sendMessage(toolResults, { tools: this.tools, ...(toolChoice && { tool_choice: toolChoice }) });
+			this._accumulateUsage(response);
 		}
-
-		// Set cumulative usage
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
-			cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
 
 		return {
 			text: this._extractText(response),
@@ -270,6 +263,7 @@ class ToolAgent extends BaseClaude {
 		let fullText = '';
 
 		// First round: send user message
+		this._resetUsage();
 		const toolChoice = this._buildToolChoice();
 		let stream = await this._streamMessage(message, { tools: this.tools, ...(toolChoice && { tool_choice: toolChoice }) });
 
@@ -293,7 +287,7 @@ class ToolAgent extends BaseClaude {
 			// (_streamMessage pushed user msg but not assistant response)
 			this.history.push({ role: 'assistant', content: finalMessage.content });
 
-			this._captureMetadata(finalMessage);
+			this._accumulateUsage(finalMessage);
 
 			// No tool calls — we're done
 			if (finalMessage.stop_reason !== 'tool_use' || toolUseBlocks.length === 0) {
@@ -397,6 +391,12 @@ class ToolAgent extends BaseClaude {
 					toolResults.push(r.toolResult);
 				}
 			}
+
+			// Claude requires exactly one tool_result per tool_use block in the
+			// preceding turn. A stop() partway through the sequential branch above
+			// leaves toolResults short, and sending a partial set is a 400. Bail out
+			// of the round before the send — matches CodeAgent.stream().
+			if (this._stopped) break;
 
 			// Send tool results back and get next stream
 			stream = await this._streamMessage(toolResults, { tools: this.tools, ...(toolChoice && { tool_choice: toolChoice }) });

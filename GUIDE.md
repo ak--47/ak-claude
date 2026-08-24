@@ -1488,7 +1488,7 @@ const { Transformer, Chat } = require('ak-claude');
 | Model | Input | Output |
 |---|---|---|
 | `claude-haiku-4-5-20251001` | $1.00 | $5.00 |
-| `claude-sonnet-5` | $3.00 ($2.00 intro through 2026-08-31) | $15.00 ($10.00 intro) |
+| `claude-sonnet-5` | $2.00 | $10.00 |
 | `claude-sonnet-4-6` | $3.00 | $15.00 |
 | `claude-opus-5` | $5.00 | $25.00 |
 | `claude-opus-4-6` | $5.00 | $25.00 |

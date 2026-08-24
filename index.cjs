@@ -391,31 +391,37 @@ function extractJSON(text) {
 import_dotenv.default.config({ quiet: true });
 var { NODE_ENV = "unknown", LOG_LEVEL = "" } = process.env;
 var DEFAULT_MAX_TOKENS = 8192;
-var MODEL_PRICING_AS_OF = "2026-07-28";
+var MODEL_PRICING_AS_OF = "2026-08-24";
 var MODEL_PRICING = {
   // Claude 5 family
   "claude-fable-5": { input: 10, output: 50 },
   "claude-mythos-5": { input: 10, output: 50 },
   // Project Glasswing only
   "claude-opus-5": { input: 5, output: 25 },
-  "claude-sonnet-5": {
-    input: 3,
-    output: 15,
-    intro: { input: 2, output: 10, until: "2026-08-31" }
-  },
+  // Sonnet 5's $2/$10 launch rate was announced as introductory through
+  // 2026-08-31, but Anthropic has since made it the standard price and
+  // cancelled the scheduled rise to $3/$15. Modelled flat — NOT as an `intro`
+  // block, which would have started overcharging 50% on 2026-09-01.
+  "claude-sonnet-5": { input: 2, output: 10 },
   // Opus 4.x
   "claude-opus-4-8": { input: 5, output: 25 },
   "claude-opus-4-7": { input: 5, output: 25 },
   "claude-opus-4-6": { input: 5, output: 25 },
-  "claude-opus-4-5": { input: 15, output: 75 },
-  "claude-opus-4-5-20250514": { input: 15, output: 75 },
+  "claude-opus-4-5": { input: 5, output: 25 },
+  "claude-opus-4-5-20250514": { input: 5, output: 25 },
+  // Retired on the direct API but still served on Bedrock / Vertex AI, which
+  // ak-claude supports — priced so estimatedCost stays non-null there.
+  "claude-opus-4-1": { input: 15, output: 75 },
+  "claude-opus-4": { input: 15, output: 75 },
   // Sonnet 4.x
   "claude-sonnet-4-6": { input: 3, output: 15 },
   "claude-sonnet-4-5": { input: 3, output: 15 },
   "claude-sonnet-4-5-20250514": { input: 3, output: 15 },
+  "claude-sonnet-4": { input: 3, output: 15 },
   // Haiku
   "claude-haiku-4-5": { input: 1, output: 5 },
-  "claude-haiku-4-5-20251001": { input: 1, output: 5 }
+  "claude-haiku-4-5-20251001": { input: 1, output: 5 },
+  "claude-haiku-3-5": { input: 0.8, output: 4 }
 };
 function _applyIntroPricing(entry, at) {
   if (!entry?.intro) return entry;
@@ -1016,6 +1022,54 @@ ${contextText}
     };
   }
   /**
+   * Zeroes the cumulative usage counters. Call once at the start of any method
+   * that makes one or more API round-trips, before the first `_accumulateUsage()`.
+   *
+   * Streaming methods must call this too: `getLastUsage()` prefers
+   * `_cumulativeUsage` whenever `attempts > 0`, so a `stream()` that only calls
+   * `_captureMetadata()` reports the token counts of whatever `send()` or
+   * `chat()` ran before it on the same instance.
+   *
+   * @protected
+   */
+  _resetUsage() {
+    this._cumulativeUsage = {
+      promptTokens: 0,
+      responseTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      totalTokens: 0,
+      attempts: 0
+    };
+  }
+  /**
+   * Captures metadata from `response` and ADDS its token counts to the running
+   * cumulative total. Call once per API round-trip.
+   *
+   * Multi-round methods (agent tool loops) make several calls per turn;
+   * assigning from the final response only — as the tool loops used to —
+   * reports the last round and undercounts the turn several-fold, because
+   * `promptTokens` grows with the accumulated history so the final round looks
+   * plausibly large on its own.
+   *
+   * `attempts` becomes the number of API round-trips in the turn.
+   *
+   * @param {Object} response - A single messages.create()/finalMessage() response
+   * @protected
+   */
+  _accumulateUsage(response) {
+    this._captureMetadata(response);
+    if (!this._cumulativeUsage) this._resetUsage();
+    const meta = this.lastResponseMetadata;
+    const cumulative = this._cumulativeUsage;
+    cumulative.promptTokens += meta.promptTokens || 0;
+    cumulative.responseTokens += meta.responseTokens || 0;
+    cumulative.cacheCreationTokens += meta.cacheCreationTokens || 0;
+    cumulative.cacheReadTokens += meta.cacheReadTokens || 0;
+    cumulative.totalTokens += meta.totalTokens || 0;
+    cumulative.attempts += 1;
+  }
+  /**
    * Returns structured usage data from the last API call.
    * Includes CUMULATIVE token counts across all retry attempts.
    * @returns {UsageData|null}
@@ -1242,6 +1296,7 @@ Do not include any additional text, explanations, or formatting before or after 
 
 Do not wrap your response in markdown code blocks.
 `;
+var EXTRACTION_RETRY_NUDGE = `Your previous response could not be parsed as JSON. Respond with a single valid JSON object and NOTHING else \u2014 no prose, no explanations, no markdown code fences.`;
 var Transformer = class extends base_default {
   /**
    * @param {TransformerOptions} [options={}]
@@ -1327,12 +1382,22 @@ var Transformer = class extends base_default {
     }
     const maxRetries = opts.maxRetries ?? this.validationRetries;
     const retryDelay = opts.retryDelay ?? this.retryDelay;
-    let lastPayload = this._preparePayload(payload);
+    const originalPayload = this._preparePayload(payload);
     this._cumulativeUsage = { promptTokens: 0, responseTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, attempts: 0 };
     let lastError = null;
+    let lastModelOutput = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const transformedPayload = attempt === 0 ? await this.rawSend(lastPayload) : await this.rebuild(lastPayload, lastError.message);
+        let transformedPayload;
+        if (attempt === 0) {
+          transformedPayload = await this.rawSend(originalPayload);
+        } else if (lastModelOutput !== null) {
+          transformedPayload = await this.rebuild(lastModelOutput, lastError.message);
+        } else {
+          transformedPayload = await this.rawSend(`${originalPayload}
+
+${EXTRACTION_RETRY_NUDGE}`);
+        }
         if (this.lastResponseMetadata) {
           this._cumulativeUsage.promptTokens += this.lastResponseMetadata.promptTokens || 0;
           this._cumulativeUsage.responseTokens += this.lastResponseMetadata.responseTokens || 0;
@@ -1341,14 +1406,19 @@ var Transformer = class extends base_default {
           this._cumulativeUsage.totalTokens += this.lastResponseMetadata.totalTokens || 0;
           this._cumulativeUsage.attempts = attempt + 1;
         }
-        lastPayload = transformedPayload;
         if (validator) {
-          await validator(transformedPayload);
+          try {
+            await validator(transformedPayload);
+          } catch (validationError) {
+            validationError._akValidationPayload = transformedPayload;
+            throw validationError;
+          }
         }
         logger_default.debug(`Transformation succeeded on attempt ${attempt + 1}`);
         return transformedPayload;
       } catch (error) {
         lastError = error;
+        lastModelOutput = "_akValidationPayload" in error ? error._akValidationPayload : null;
         logger_default.warn(`Attempt ${attempt + 1} failed: ${error.message}`);
         if (attempt >= maxRetries) {
           logger_default.error(`All ${maxRetries + 1} attempts failed.`);
@@ -1376,17 +1446,31 @@ var Transformer = class extends base_default {
       if (response.usage && logger_default.level !== "silent") {
         logger_default.debug(`API response: model=${response.model || "unknown"}, tokens=${response.usage.input_tokens + response.usage.output_tokens}`);
       }
-      const extractedJSON = extractJSON(modelResponse);
-      if (extractedJSON?.data) {
-        return extractedJSON.data;
-      }
-      return extractedJSON;
+      return this._parseModelResponse(modelResponse);
     } catch (error) {
       if (this.onlyJSON && error.message.includes("Could not extract valid JSON")) {
         throw new Error(`Invalid JSON response from Claude: ${error.message}`);
       }
       throw new Error(`Transformation failed: ${error.message}`);
     }
+  }
+  // ── Response Parsing ─────────────────────────────────────────────────────
+  /**
+   * Turns raw model text into the transformed payload.
+   *
+   * Shared by `rawSend()`, `rebuild()` and `_statelessSend()` so all three apply
+   * the SAME two steps: `extractJSON()` and the `{data: …}` unwrap that seeded
+   * Transformers need — `seed()` always uses `format: 'json'`, which trains the
+   * model to answer in that envelope. `rebuild()` used to skip the unwrap, so it
+   * returned `{data: payload}` where attempt 0 returned `payload`.
+   *
+   * @param {string} modelResponse - Raw text from the model
+   * @returns {Object} The transformed payload
+   * @protected
+   */
+  _parseModelResponse(modelResponse) {
+    const extracted = extractJSON(modelResponse);
+    return extracted?.data ? extracted.data : extracted;
   }
   // ── Rebuild ──────────────────────────────────────────────────────────────
   /**
@@ -1419,8 +1503,7 @@ Respond with JSON only \u2013 no comments or explanations.
       throw new Error(`Claude call failed while repairing payload: ${err.message}`);
     }
     try {
-      const text = this._extractText(response);
-      return extractJSON(text);
+      return this._parseModelResponse(this._extractText(response));
     } catch (parseErr) {
       throw new Error(`Claude returned non-JSON while repairing payload: ${parseErr.message}`);
     }
@@ -1461,9 +1544,7 @@ Respond with JSON only \u2013 no comments or explanations.
       totalTokens: this.lastResponseMetadata.totalTokens,
       attempts: 1
     };
-    const modelResponse = this._extractText(response);
-    const extractedJSON = extractJSON(modelResponse);
-    let transformedPayload = extractedJSON?.data ? extractedJSON.data : extractedJSON;
+    let transformedPayload = this._parseModelResponse(this._extractText(response));
     if (validatorFn) {
       await validatorFn(transformedPayload);
     }
@@ -1559,16 +1640,10 @@ var Chat = class extends base_default {
    * @returns {Promise<ChatResponse>} Response with text and usage data
    */
   async send(message, opts = {}) {
+    this._resetUsage();
     const response = await this._sendMessage(message, opts);
+    this._accumulateUsage(response);
     const text = this._extractText(response);
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
-      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
     return {
       text,
       usage: this.getLastUsage()
@@ -1584,6 +1659,7 @@ var Chat = class extends base_default {
   async *stream(message, opts = {}) {
     if (!this._initialized) await this.init();
     let fullText = "";
+    this._resetUsage();
     const stream = await this._streamMessage(message, opts);
     const finalMessage = await stream.finalMessage();
     for (const block of finalMessage.content) {
@@ -1593,7 +1669,7 @@ var Chat = class extends base_default {
       }
     }
     this.history.push({ role: "assistant", content: finalMessage.content });
-    this._captureMetadata(finalMessage);
+    this._accumulateUsage(finalMessage);
     yield {
       type: "done",
       fullText,
@@ -1863,8 +1939,10 @@ var ToolAgent = class extends base_default {
     if (!this._initialized) await this.init();
     this._stopped = false;
     const allToolCalls = [];
+    this._resetUsage();
     const toolChoice = this._buildToolChoice();
     let response = await this._sendMessage(message, { tools: this.tools, ...toolChoice && { tool_choice: toolChoice } });
+    this._accumulateUsage(response);
     for (let round = 0; round < this.maxToolRounds; round++) {
       if (this._stopped) break;
       if (response.stop_reason !== "tool_use") break;
@@ -1905,15 +1983,8 @@ var ToolAgent = class extends base_default {
       const toolResults = results.map((r) => r.toolResult);
       for (const r of results) allToolCalls.push(r.toolCall);
       response = await this._sendMessage(toolResults, { tools: this.tools, ...toolChoice && { tool_choice: toolChoice } });
+      this._accumulateUsage(response);
     }
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
-      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
     return {
       text: this._extractText(response),
       toolCalls: allToolCalls,
@@ -1940,6 +2011,7 @@ var ToolAgent = class extends base_default {
     this._stopped = false;
     const allToolCalls = [];
     let fullText = "";
+    this._resetUsage();
     const toolChoice = this._buildToolChoice();
     let stream = await this._streamMessage(message, { tools: this.tools, ...toolChoice && { tool_choice: toolChoice } });
     for (let round = 0; round < this.maxToolRounds; round++) {
@@ -1955,7 +2027,7 @@ var ToolAgent = class extends base_default {
         }
       }
       this.history.push({ role: "assistant", content: finalMessage.content });
-      this._captureMetadata(finalMessage);
+      this._accumulateUsage(finalMessage);
       if (finalMessage.stop_reason !== "tool_use" || toolUseBlocks.length === 0) {
         yield {
           type: "done",
@@ -2048,6 +2120,7 @@ var ToolAgent = class extends base_default {
           toolResults.push(r.toolResult);
         }
       }
+      if (this._stopped) break;
       stream = await this._streamMessage(toolResults, { tools: this.tools, ...toolChoice && { tool_choice: toolChoice } });
     }
     yield {
@@ -2873,7 +2946,9 @@ ${this.envOverview}`;
     this._stopped = false;
     const toolCalls = [];
     let consecutiveFailures = 0;
+    this._resetUsage();
     let response = await this._sendMessage(message, { tools: this._tools });
+    this._accumulateUsage(response);
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
       if (response.stop_reason !== "tool_use") break;
@@ -2906,16 +2981,9 @@ ${this.envOverview}`;
       }
       if (this._stopped) break;
       response = await this._sendMessage(toolResults, { tools: this._tools });
+      this._accumulateUsage(response);
       if (consecutiveFailures >= this.codeMaxRetries) break;
     }
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
-      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
     const codeExecutions = toolCalls.filter((tc) => tc.tool === "execute_code" || tc.tool === "write_and_run_code" || tc.tool === "fix_code" && tc.executed).map((tc) => ({
       code: tc.code || tc.fixedCode,
       purpose: this._slugify(tc.purpose),
@@ -2954,6 +3022,7 @@ ${this.envOverview}`;
     const toolCalls = [];
     let fullText = "";
     let consecutiveFailures = 0;
+    this._resetUsage();
     let stream = await this._streamMessage(message, { tools: this._tools });
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
@@ -2968,7 +3037,7 @@ ${this.envOverview}`;
         }
       }
       this.history.push({ role: "assistant", content: finalMessage.content });
-      this._captureMetadata(finalMessage);
+      this._accumulateUsage(finalMessage);
       if (finalMessage.stop_reason !== "tool_use" || toolUseBlocks.length === 0) {
         const codeExecutions2 = toolCalls.filter((tc) => tc.tool === "execute_code" || tc.tool === "write_and_run_code" || tc.tool === "fix_code" && tc.executed).map((tc) => ({
           code: tc.code || tc.fixedCode,
@@ -3230,15 +3299,9 @@ ${serialized}` });
    */
   async chat(message, opts = {}) {
     if (!this._initialized) await this.init();
+    this._resetUsage();
     const response = await this._sendMessage(message, opts);
-    this._cumulativeUsage = {
-      promptTokens: this.lastResponseMetadata.promptTokens,
-      responseTokens: this.lastResponseMetadata.responseTokens,
-      cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
-      cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
-      totalTokens: this.lastResponseMetadata.totalTokens,
-      attempts: 1
-    };
+    this._accumulateUsage(response);
     const result = {
       text: this._extractText(response),
       usage: this.getLastUsage()
@@ -3281,6 +3344,7 @@ ${serialized}` });
   async *stream(message, opts = {}) {
     if (!this._initialized) await this.init();
     let fullText = "";
+    this._resetUsage();
     const stream = await this._streamMessage(message, opts);
     const finalMessage = await stream.finalMessage();
     for (const block of finalMessage.content) {
@@ -3290,7 +3354,7 @@ ${serialized}` });
       }
     }
     this.history.push({ role: "assistant", content: finalMessage.content });
-    this._captureMetadata(finalMessage);
+    this._accumulateUsage(finalMessage);
     yield {
       type: "done",
       fullText,

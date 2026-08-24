@@ -863,7 +863,9 @@ ${lang.codeRules}
 		const toolCalls = [];
 		let consecutiveFailures = 0;
 
+		this._resetUsage();
 		let response = await this._sendMessage(message, { tools: this._tools });
+		this._accumulateUsage(response);
 
 		for (let round = 0; round < this.maxRounds; round++) {
 			if (this._stopped) break;
@@ -905,18 +907,10 @@ ${lang.codeRules}
 			if (this._stopped) break;
 
 			response = await this._sendMessage(toolResults, { tools: this._tools });
+			this._accumulateUsage(response);
 
 			if (consecutiveFailures >= this.codeMaxRetries) break;
 		}
-
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
-			cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
 
 		// Build backward-compat codeExecutions (only execute_code + write_and_run_code)
 		const codeExecutions = toolCalls
@@ -964,6 +958,7 @@ ${lang.codeRules}
 		let fullText = '';
 		let consecutiveFailures = 0;
 
+		this._resetUsage();
 		let stream = await this._streamMessage(message, { tools: this._tools });
 
 		for (let round = 0; round < this.maxRounds; round++) {
@@ -984,7 +979,7 @@ ${lang.codeRules}
 
 			// Push assistant response to history
 			this.history.push({ role: 'assistant', content: finalMessage.content });
-			this._captureMetadata(finalMessage);
+			this._accumulateUsage(finalMessage);
 
 			if (finalMessage.stop_reason !== 'tool_use' || toolUseBlocks.length === 0) {
 				const codeExecutions = toolCalls

@@ -68,19 +68,12 @@ class Chat extends BaseClaude {
 	 * @returns {Promise<ChatResponse>} Response with text and usage data
 	 */
 	async send(message, opts = {}) {
+		this._resetUsage();
 		const response = await this._sendMessage(message, opts);
+		// _sendMessage already captured metadata; fold it into the cumulative total.
+		this._accumulateUsage(response);
 
 		const text = this._extractText(response);
-
-		// Set cumulative usage (single attempt for Chat)
-		this._cumulativeUsage = {
-			promptTokens: this.lastResponseMetadata.promptTokens,
-			responseTokens: this.lastResponseMetadata.responseTokens,
-			cacheCreationTokens: this.lastResponseMetadata.cacheCreationTokens,
-			cacheReadTokens: this.lastResponseMetadata.cacheReadTokens,
-			totalTokens: this.lastResponseMetadata.totalTokens,
-			attempts: 1
-		};
 
 		return {
 			text,
@@ -99,6 +92,7 @@ class Chat extends BaseClaude {
 		if (!this._initialized) await this.init();
 
 		let fullText = '';
+		this._resetUsage();
 		const stream = await this._streamMessage(message, opts);
 		const finalMessage = await stream.finalMessage();
 
@@ -110,7 +104,7 @@ class Chat extends BaseClaude {
 		}
 
 		this.history.push({ role: 'assistant', content: finalMessage.content });
-		this._captureMetadata(finalMessage);
+		this._accumulateUsage(finalMessage);
 
 		yield {
 			type: 'done',

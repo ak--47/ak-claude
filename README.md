@@ -443,8 +443,9 @@ default 5m TTL, 2× at 1h; read 0.1× input). This is the opposite of `ak-gemini
 where `promptTokenCount` *includes* cached tokens and they are subtracted.
 
 `resolvePricing(id, { at })` and `computeCost(..., { at, cacheTtl })` accept an
-explicit date, which matters for Sonnet 5: it bills at an introductory $2/$10 per
-M through 2026-08-31, then $3/$15.
+explicit date, for models on a promotional rate. No model carries one today:
+Sonnet 5's $2/$10 launch rate was announced as introductory through 2026-08-31,
+but Anthropic made it the standard price and cancelled the rise to $3/$15.
 
 > **Sonnet 5 tokenizer:** Sonnet 5 produces roughly **30% more tokens than
 > Sonnet 4.6 for the same text**. Re-check cost projections, `maxTokens` sizing,

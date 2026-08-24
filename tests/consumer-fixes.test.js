@@ -134,7 +134,7 @@ describe('consumer-fixes (ak-claude)', () => {
 		});
 
 		it('resolves bare opus-4-5 / sonnet-4-5 ids (B2)', () => {
-			expect(resolvePricing('claude-opus-4-5')).toMatchObject({ input: 15.00, output: 75.00 });
+			expect(resolvePricing('claude-opus-4-5')).toMatchObject({ input: 5.00, output: 25.00 });
 			expect(resolvePricing('claude-sonnet-4-5')).toMatchObject({ input: 3.00, output: 15.00 });
 		});
 
@@ -439,19 +439,31 @@ describe('consumer-fixes (ak-claude)', () => {
 			}
 		});
 
-		it('applies Sonnet 5 intro pricing only inside the window', () => {
-			const before = resolvePricing('claude-sonnet-5', { at: '2026-07-01' });
-			expect(before.input).toBe(2.00);
-			expect(before.output).toBe(10.00);
-			expect(before.introUntil).toBe('2026-08-31');
+		it('prices Sonnet 5 flat — the intro rate became the standard price', () => {
+			// Announced as introductory through 2026-08-31, but Anthropic cancelled
+			// the scheduled rise to $3/$15. Must NOT jump on 2026-09-01.
+			for (const at of ['2026-07-01', '2026-09-01', '2027-01-01']) {
+				const p = resolvePricing('claude-sonnet-5', { at });
+				expect(p.input).toBe(2.00);
+				expect(p.output).toBe(10.00);
+				expect(p.introUntil).toBeUndefined();
+			}
+			expect(computeCost('claude-sonnet-5', 1_000_000, 0, 0, 0, { at: '2026-09-01' })).toBeCloseTo(2.00, 5);
+		});
 
-			const after = resolvePricing('claude-sonnet-5', { at: '2026-09-01' });
-			expect(after.input).toBe(3.00);
-			expect(after.output).toBe(15.00);
-			expect(after.introUntil).toBeUndefined();
-
-			expect(computeCost('claude-sonnet-5', 1_000_000, 0, 0, 0, { at: '2026-07-01' })).toBeCloseTo(2.00, 5);
-			expect(computeCost('claude-sonnet-5', 1_000_000, 0, 0, 0, { at: '2026-09-01' })).toBeCloseTo(3.00, 5);
+		it('still honours an intro window when a model has one', () => {
+			// No model currently carries an `intro` block, but the mechanism must keep
+			// working so the next promo can be added as data alone.
+			MODEL_PRICING['__test-intro-model'] = { input: 10, output: 50, intro: { input: 4, output: 20, until: '2026-12-31' } };
+			try {
+				const inside = resolvePricing('__test-intro-model', { at: '2026-06-01' });
+				expect(inside).toMatchObject({ input: 4, output: 20, introUntil: '2026-12-31' });
+				const outside = resolvePricing('__test-intro-model', { at: '2027-01-01' });
+				expect(outside).toMatchObject({ input: 10, output: 50 });
+				expect(outside.introUntil).toBeUndefined();
+			} finally {
+				delete MODEL_PRICING['__test-intro-model'];
+			}
 		});
 
 		it('bills 1h cache writes at 2x and 5m writes at 1.25x (C)', () => {
@@ -527,6 +539,108 @@ describe('consumer-fixes (ak-claude)', () => {
 			expect(mk({ name: 'a', input_schema: schema }).tools[0].input_schema).toEqual(schema);
 			expect(mk({ name: 'b', inputSchema: schema }).tools[0].input_schema).toEqual(schema);
 			expect(mk({ name: 'c', parametersJsonSchema: schema }).tools[0].input_schema).toEqual(schema);
+		});
+	});
+	// ── 0.3.0: streaming usage, multi-round accounting, retry class ──
+	describe('0.3.0 defect sweep', () => {
+		/** A finalMessage()-shaped stream stub. */
+		const stubStream = (msg) => ({ finalMessage: async () => msg });
+
+		// ── streams must not report a previous call's tokens ──
+		it('Chat.stream reports this call\'s usage, not the previous send\'s', async () => {
+			const chat = new Chat({ ...KEY, modelName: 'claude-sonnet-4-6' });
+			chat._initialized = true;
+			chat.client = {
+				messages: {
+					create: async () => textResponse('first', 1000, 2000),
+					stream: () => stubStream(textResponse('second', 7, 9))
+				}
+			};
+
+			const sent = await chat.send('one');
+			expect(sent.usage.promptTokens).toBe(1000);
+
+			let done = null;
+			for await (const ev of chat.stream('two')) if (ev.type === 'done') done = ev;
+			// Was reporting 1000/2000 — the cumulative left behind by send().
+			expect(done.usage.promptTokens).toBe(7);
+			expect(done.usage.responseTokens).toBe(9);
+			expect(done.usage.attempts).toBe(1);
+		});
+
+		// ── multi-round tool turns must sum every round ──
+		it('ToolAgent.chat sums tokens across every round', async () => {
+			const agent = new ToolAgent({
+				...KEY, modelName: 'claude-sonnet-4-6',
+				tools: [{ name: 'noop', description: 'n', input_schema: { type: 'object' } }],
+				toolExecutor: async () => 'done'
+			});
+			agent._initialized = true;
+			const responses = [
+				{ content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }], model: 'claude-sonnet-4-6', stop_reason: 'tool_use', usage: { input_tokens: 100, output_tokens: 10 } },
+				textResponse('final', 200, 20)
+			];
+			let call = 0;
+			agent.client = { messages: { create: async () => responses[call++] } };
+
+			const r = await agent.chat('hi');
+			expect(r.usage.promptTokens).toBe(300);   // 100 + 200, not just the final round
+			expect(r.usage.responseTokens).toBe(30);
+			expect(r.usage.attempts).toBe(2);
+		});
+
+		// ── rebuild() must match rawSend()'s parsing ──
+		it('Transformer.rebuild unwraps the data envelope like rawSend', async () => {
+			const tf = new Transformer({ ...KEY, modelName: 'claude-sonnet-4-6' });
+			tf._initialized = true;
+			tf.client = { messages: { create: async () => textResponse('{"data":{"fixed":true}}', 5, 5) } };
+			// Was returning {data:{fixed:true}} where attempt 0 returns {fixed:true}.
+			expect(await tf.rebuild({ broken: true }, 'nope')).toEqual({ fixed: true });
+		});
+
+		// ── extraction failures retry the task, not rebuild() ──
+		it('Transformer.send retries an unparseable response with a format nudge', async () => {
+			const tf = new Transformer({ ...KEY, modelName: 'claude-sonnet-4-6', retryDelay: 1 });
+			tf._initialized = true;
+			const sent = [];
+			let call = 0;
+			tf.client = {
+				messages: {
+					create: async (params) => {
+						sent.push(JSON.stringify(params.messages[params.messages.length - 1].content));
+						return call++ === 0
+							? textResponse('Here is a haiku about the ocean instead.', 5, 5)
+							: textResponse('{"ok":true}', 5, 5);
+					}
+				}
+			};
+
+			const out = await tf.send({ some: 'input' });
+			expect(out).toEqual({ ok: true });
+			expect(sent[1]).not.toContain('BAD PAYLOAD');
+			expect(sent[1]).toContain('could not be parsed as JSON');
+		});
+
+		it('Transformer.send still rebuilds the model output on a validation failure', async () => {
+			const tf = new Transformer({ ...KEY, modelName: 'claude-sonnet-4-6', retryDelay: 1 });
+			tf._initialized = true;
+			const sent = [];
+			let call = 0;
+			tf.client = {
+				messages: {
+					create: async (params) => {
+						sent.push(JSON.stringify(params.messages[params.messages.length - 1].content));
+						return call++ === 0 ? textResponse('{"wrong":1}', 5, 5) : textResponse('{"right":1}', 5, 5);
+					}
+				}
+			};
+
+			const validator = async (p) => { if (!p.right) throw new Error('needs a right key'); };
+			const out = await tf.send({ some: 'input' }, {}, validator);
+			expect(out).toEqual({ right: 1 });
+			// The repair prompt shows the MODEL's output, not the user's input.
+			expect(sent[1]).toContain('BAD PAYLOAD');
+			expect(sent[1]).toContain('wrong');
 		});
 	});
 });
